@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  background-color: #0B0F17;
+  color: #F1F5F9;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-industrial {
+  font-family: 'Chakra Petch', 'JetBrains Mono', monospace;
+}
+
+.font-mono-code {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Industrial Alarm Pulse */
+@keyframes alarm-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6);
+    border-color: rgba(239, 68, 68, 0.9);
+  }
+  50% {
+    box-shadow: 0 0 25px 8px rgba(239, 68, 68, 0.35);
+    border-color: rgba(239, 68, 68, 1);
+  }
+}
+
+.animate-alarm-pulse {
+  animation: alarm-pulse 1.8s infinite ease-in-out;
+}
+
+/* Sub-card bevel for authentic HMI physical feel */
+.hmi-inset {
+  box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.5);
+}
+
+.hmi-raised {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.4);
+}

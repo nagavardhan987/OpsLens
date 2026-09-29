@@ -41,7 +41,7 @@ OpsLens is an **edge-deployable AI copilot for industrial operators** (HMI/SCADA
 
 ```
 opslens/
-├── opslens-generator/        # FastAPI backend
+├── edge_intelligence/        # FastAPI backend
 │   ├── server.py             # Entry point (port 8000)
 │   ├── orchestrator.py       # Pipeline manager
 │   ├── correlator.py         # Topology-aware root cause correlation
@@ -65,9 +65,8 @@ opslens/
 │   │   └── routes.py
 │   └── tests/
 │
-└── ops-lens/
-    └── frontend/             # React + Vite HMI
-        ├── src/
+└── hmi_ui/                   # React + Vite HMI
+    ├── src/
         │   ├── App.jsx       # Root: all state management
         │   ├── api/client.js # All REST + SSE calls
         │   └── components/
@@ -111,7 +110,7 @@ opslens/
 ### Backend
 
 ```bash
-cd opslens-generator
+cd edge_intelligence
 pip install -r requirements.txt
 python server.py
 # FastAPI running at http://localhost:8000
@@ -120,7 +119,7 @@ python server.py
 ### Frontend
 
 ```bash
-cd ops-lens/frontend
+cd hmi_ui
 npm install
 npm run dev
 # Vite dev server at http://localhost:5173
@@ -129,7 +128,7 @@ npm run dev
 ### Run Tests
 
 ```bash
-cd opslens-generator
+cd edge_intelligence
 python -m unittest discover tests -v
 # 49/49 tests pass
 ```
@@ -141,10 +140,103 @@ python -m unittest discover tests -v
 | Layer | Technology |
 |-------|-----------|
 | Backend | Python 3.11, FastAPI, SQLite, asyncio |
-| ML/RAG | sentence-transformers (all-MiniLM-L6-v2), BM25 |
+| ML/RAG | sentence-transformers (all-MiniLM-L6-v2), Qdrant, optional BM25 fallback |
 | Frontend | React 18, Vite, Tailwind CSS, Lucide Icons |
 | LLM | Gemini API / Ollama (offline SLM) / deterministic fallback |
-| Deployment | Edge PC, single SQLite DB, no cloud required |
+| Deployment | Edge PC, local Qdrant + SQLite, no cloud required |
+
+## Local Qdrant RAG and edge deployment
+
+Qdrant is the primary vector store. OpsLens connects to the local Qdrant service at `http://localhost:6333` by default; it does not require Pinecone or cloud access. SentenceTransformer uses `all-MiniLM-L6-v2` (384 dimensions). The model must be present in the local Hugging Face/SentenceTransformer cache before disconnecting the edge PC from the internet.
+
+### Start Qdrant on the edge PC
+
+From the repository root, with Docker Engine/Desktop installed:
+
+```powershell
+docker compose up -d qdrant
+```
+
+Qdrant's REST API is at `http://localhost:6333`, and its data is persisted in the `qdrant_storage` Docker volume. To run Qdrant as a native edge service instead, install the Qdrant server on that PC and set `QDRANT_URL` to its local HTTP endpoint. OpsLens never connects to a hosted Qdrant by default.
+
+### Collection and payload schema
+
+The collection is `opslens_sops`, configured by `QDRANT_COLLECTION`. It uses 384 dimensional vectors with cosine distance. Each point is one SOP section/step chunk; its vector is generated from chunk text by `all-MiniLM-L6-v2`. Payload fields include `document_id`, `document_name`, `sop_id`, `title`, `revision`, `equipment`, `equipment_type`, `plant_area`, `section`, `page`, `source`, `effective_date`, `chunk_id`, and the original `text`, plus source-document fields such as `instruction`, `keywords`, and `reference_limits`.
+
+### Install and ingest SOPs
+
+```powershell
+cd edge_intelligence
+python -m pip install -r requirements.txt
+# If this machine has internet on initial setup, cache the model before going offline:
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+$env:QDRANT_URL = 'http://localhost:6333'
+$env:QDRANT_COLLECTION = 'opslens_sops'
+python ingest_sops.py
+```
+
+Ingestion reads each JSON file in `edge_intelligence/sop_documents/`, creates an overview chunk and procedure chunks, embeds them locally, and upserts deterministic point IDs into Qdrant. Repeat `python ingest_sops.py` after adding or changing SOP files. The existing `VectorStore` abstraction allows replacing the Qdrant implementation without changing ingestion or RAG orchestration.
+
+### Run the complete local system
+
+Start Qdrant first as above. In one terminal, from `edge_intelligence`, install requirements, ensure the embedding model is cached, set the two environment variables above, and run:
+
+```powershell
+python server.py
+```
+
+In another terminal:
+
+```powershell
+cd hmi_ui
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. The simulator, SQLite database, FastAPI backend, Qdrant, embedding model, and optional local Ollama/SLM all run on the edge PC. OPC UA remains available as a read-only adapter. Cloud LLM credentials are optional; Qdrant and retrieval use only local services. For a single-process development setup, `QDRANT_URL=embedded` selects persistent embedded Qdrant storage under `QDRANT_PATH` (default `./qdrant_data`); use the Qdrant service for normal multi-request deployments.
+
+### Retrieval flow and example
+
+Time-series processing keeps bounded per-tag history and emits baseline deviation, trend, rate-of-change, threshold, and change-point observations. The alarm synthesis layer combines those observations with the event story. The NetworkX graph adds relationships among Pump-02, Valve-04, Flow-02, Motor-02, Pressure-02, and their tags. The RAG query includes equipment, synthesized alarm, symptoms, latest telemetry, event story, likely contributor, and graph context. Qdrant applies equipment/plant-area payload filters as a preference and retries unfiltered if the preferred subset is empty.
+
+Example Qdrant vector search (the application supplies the 384-value embedding generated from the complete contextual incident string):
+
+```python
+hits = client.query_points(
+    collection_name="opslens_sops",
+    query=incident_embedding.tolist(),  # 384-vector for the complete contextual incident
+    limit=5,
+    with_payload=True,
+).points
+# hit.score is Qdrant's cosine similarity; hit.payload contains the SOP chunk.
+```
+
+OpsLens returns each hit's actual Qdrant cosine score as `similarity` and the best SOP's score as `semantic_similarity`, never as a probability or confidence. A retrieval object has this shape:
+
+```json
+{
+  "sop_id": "SOP-P02-VLV-01",
+  "title": "Pump-02 Throttling Valve Restriction Remediation",
+  "revision": "1.0",
+  "semantic_similarity": 0.7645,
+  "retrieval_method": "qdrant_vector_search",
+  "embedding_model": "all-MiniLM-L6-v2",
+  "why_retrieved": {
+    "incident": "Pump-02 High Pressure",
+    "equipment": "Pump-02",
+    "alarm": "ALM-P02-HP",
+    "symptoms": ["Valve position decreased", "Flow decreased", "Motor current increased", "Pressure increased"],
+    "matching_section": "step"
+  },
+  "chunks": [
+    {"document_id": "SOP-P02-VLV-01", "sop_id": "SOP-P02-VLV-01", "title": "Pump-02 Throttling Valve Restriction Remediation", "revision": "1.0", "section": "step", "page": 2, "chunk_id": "…", "text": "…", "similarity": 0.7645}
+  ]
+}
+```
+
+`GET /api/rag/health` reports Qdrant connection state, collection, SOP document count, chunk count, and embedding model. `GET /api/debug/rag/{incident_id}` exposes the embedded contextual query and top-K Qdrant results. `GET /api/sops/{sop_id}` reconstructs the full procedure from Qdrant payloads; the existing SOP viewer fetches this endpoint when opened and does not contain hardcoded procedure steps. The model receives the incident context, evidence, and retrieved chunks and is instructed to rely only on those facts; when evidence is insufficient it must respond with “Operator verification required.”
+
+Industrial adapters remain read-only. Qdrant, RAG, and the language model provide advisory content only; there is no path from retrieval or generation to PLC, pump, valve, actuator, or setpoint writes.
 
 ---
 

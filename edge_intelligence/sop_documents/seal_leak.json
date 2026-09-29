@@ -1,0 +1,29 @@
+{
+  "sop_id": "SOP-P02-SEAL-01",
+  "title": "Pump-02 Mechanical Seal Leak & Low Flow Isolation",
+  "equipment_id": "Pump-02",
+  "tags": ["FIT-02-FLW", "PIT-02-PRS", "TNK-01-LVL"],
+  "keywords": [
+    "seal leak",
+    "flow reduction",
+    "pressure reduction",
+    "mechanical seal failure",
+    "casing seal breach",
+    "loss of containment"
+  ],
+  "reference_limits": {
+    "min_flow_limit": 50.0,
+    "unit_flow": "L/min",
+    "min_pressure_limit": 3.5,
+    "unit_pressure": "bar",
+    "nominal_baseline": "Flow 75-90 L/min, Pressure 4.2-5.2 bar"
+  },
+  "steps": [
+    "Identify simultaneous drops in discharge flow FIT-02-FLW (<50 L/min) and pressure PIT-02-PRS (<3.5 bar).",
+    "Inspect pump casing seal chamber and drain basin for liquid pooling or vapor plume.",
+    "Check suction buffer tank TNK-01-LVL to rule out feed loss or upstream cavitation.",
+    "Throttle discharge isolation valve to prevent reverse flow and isolate auxiliary flush lines.",
+    "Switch service to standby auxiliary feed pump Pump-01 if running.",
+    "Depressurize Pump-02 fluid end and lock out pump motor for mechanical seal replacement."
+  ]
+}

@@ -1,0 +1,147 @@
+{
+  "model": "all-MiniLM-L6-v2",
+  "has_embeddings": false,
+  "sops": [
+    {
+      "sop_id": "SOP-C01-BRG-01",
+      "title": "Compressor-01 Drive-End Bearing Vibration & Fatigue Response",
+      "equipment_id": "Compressor-01",
+      "tags": [
+        "CMP-01-VIB",
+        "CMP-01-CUR",
+        "CMP-01-TMP",
+        "ALM-C01-VB"
+      ],
+      "keywords": [
+        "bearing vibration",
+        "stator current rise",
+        "bearing temperature rise",
+        "high vibration alarm",
+        "mechanical fatigue",
+        "drive end bearing",
+        "journal friction"
+      ],
+      "reference_limits": {
+        "max_trip_limit": 7.0,
+        "unit": "mm/s",
+        "parameter": "bearing_vibration",
+        "nominal_baseline": "1.2 - 2.8 mm/s",
+        "temperature_limit": "85.0 °C"
+      },
+      "steps": [
+        "Acknowledge high vibration alarm ALM-C01-VB on Compressor-01 supervisory console.",
+        "Check drive-end vibration transmitter CMP-01-VIB spectrum against 7.0 mm/s shutdown limit.",
+        "Monitor bearing temperature CMP-01-TMP trend; if temperature exceeds 85.0 °C, initiate controlled deceleration.",
+        "Check motor stator current CMP-01-CUR to assess mechanical drag from bearing seizure.",
+        "Engage auxiliary lube oil cooling pump and inspect bearing oil supply pressure.",
+        "If vibration does not drop below 2.8 mm/s baseline, trip compressor and dispatch maintenance for mechanical bearing inspection."
+      ]
+    },
+    {
+      "sop_id": "SOP-P02-SEAL-01",
+      "title": "Pump-02 Mechanical Seal Leak & Low Flow Isolation",
+      "equipment_id": "Pump-02",
+      "tags": [
+        "FIT-02-FLW",
+        "PIT-02-PRS",
+        "TNK-01-LVL"
+      ],
+      "keywords": [
+        "seal leak",
+        "flow reduction",
+        "pressure reduction",
+        "mechanical seal failure",
+        "casing seal breach",
+        "loss of containment"
+      ],
+      "reference_limits": {
+        "min_flow_limit": 50.0,
+        "unit_flow": "L/min",
+        "min_pressure_limit": 3.5,
+        "unit_pressure": "bar",
+        "nominal_baseline": "Flow 75-90 L/min, Pressure 4.2-5.2 bar"
+      },
+      "steps": [
+        "Identify simultaneous drops in discharge flow FIT-02-FLW (<50 L/min) and pressure PIT-02-PRS (<3.5 bar).",
+        "Inspect pump casing seal chamber and drain basin for liquid pooling or vapor plume.",
+        "Check suction buffer tank TNK-01-LVL to rule out feed loss or upstream cavitation.",
+        "Throttle discharge isolation valve to prevent reverse flow and isolate auxiliary flush lines.",
+        "Switch service to standby auxiliary feed pump Pump-01 if running.",
+        "Depressurize Pump-02 fluid end and lock out pump motor for mechanical seal replacement."
+      ]
+    },
+    {
+      "sop_id": "SOP-GEN-SEN-01",
+      "title": "Diagnostic Procedure for Isolated Instrument Sensor Faults",
+      "equipment_id": "Generic",
+      "tags": [
+        "PIT-02-PRS",
+        "FIT-02-FLW",
+        "CMP-01-VIB",
+        "TNK-01-LVL"
+      ],
+      "keywords": [
+        "sensor fault",
+        "transmitter spike",
+        "false positive",
+        "isolated anomaly",
+        "instrument malfunction",
+        "loop integrity",
+        "signal drift"
+      ],
+      "reference_limits": {
+        "rate_of_change_threshold": "30% excursion in < 2 seconds with zero causal correlation",
+        "action": "Sensor diagnostics and plausibility cross-check"
+      },
+      "steps": [
+        "Verify if tag excursion occurs without any upstream or downstream deviation in the causal topology.",
+        "Inspect 4-20mA loop integrity, terminal wiring, and power supply on transmitter junction box.",
+        "Perform local field gauge cross-check to verify whether physical process variable is actually deviant.",
+        "If local reading matches nominal baseline, place DCS loop in manual mode and flag transmitter for recalibration.",
+        "Replace faulty sensor cartridge or signal conditioner and perform zero/span calibration prior to re-enabling alarms."
+      ]
+    },
+    {
+      "sop_id": "SOP-P02-VLV-01",
+      "title": "Pump-02 Throttling Valve Restriction Remediation",
+      "equipment_id": "Pump-02",
+      "tags": [
+        "VLV-04-POS",
+        "FIT-02-FLW",
+        "MOT-02-CUR",
+        "PIT-02-PRS",
+        "ALM-P02-HP"
+      ],
+      "keywords": [
+        "valve restriction",
+        "flow reduction",
+        "motor current surge",
+        "pressure surge",
+        "high pressure alarm",
+        "discharge throttle",
+        "line overpressure"
+      ],
+      "reference_limits": {
+        "max_trip_limit": 6.5,
+        "unit": "bar",
+        "parameter": "discharge_pressure",
+        "nominal_baseline": "4.2 - 5.2 bar"
+      },
+      "steps": [
+        "Silence and acknowledge high pressure alarm ALM-P02-HP on supervisory HMI panel.",
+        "Inspect throttling control valve VLV-04-POS position feedback against automated DCS output.",
+        "If VLV-04-POS is pinched or restricted below 70%, switch loop to manual bypass mode.",
+        "Monitor discharge flow transmitter FIT-02-FLW to verify volumetric recovery above 75 L/min.",
+        "Verify motor current MOT-02-CUR subsides below 8.2 A nominal threshold.",
+        "Once discharge line pressure PIT-02-PRS stabilizes below 5.2 bar, reset ALM-P02-HP and restore cascade control."
+      ]
+    }
+  ],
+  "texts": [
+    "Title: Compressor-01 Drive-End Bearing Vibration & Fatigue Response\nSOP ID: SOP-C01-BRG-01\nEquipment: Compressor-01\nApplicable Tags: CMP-01-VIB CMP-01-CUR CMP-01-TMP ALM-C01-VB\nKeywords: bearing vibration, stator current rise, bearing temperature rise, high vibration alarm, mechanical fatigue, drive end bearing, journal friction\nReference Limits: {\"max_trip_limit\": 7.0, \"unit\": \"mm/s\", \"parameter\": \"bearing_vibration\", \"nominal_baseline\": \"1.2 - 2.8 mm/s\", \"temperature_limit\": \"85.0 \\u00b0C\"}\nProcedure Steps:\n1. Acknowledge high vibration alarm ALM-C01-VB on Compressor-01 supervisory console.\n2. Check drive-end vibration transmitter CMP-01-VIB spectrum against 7.0 mm/s shutdown limit.\n3. Monitor bearing temperature CMP-01-TMP trend; if temperature exceeds 85.0 °C, initiate controlled deceleration.\n4. Check motor stator current CMP-01-CUR to assess mechanical drag from bearing seizure.\n5. Engage auxiliary lube oil cooling pump and inspect bearing oil supply pressure.\n6. If vibration does not drop below 2.8 mm/s baseline, trip compressor and dispatch maintenance for mechanical bearing inspection.",
+    "Title: Pump-02 Mechanical Seal Leak & Low Flow Isolation\nSOP ID: SOP-P02-SEAL-01\nEquipment: Pump-02\nApplicable Tags: FIT-02-FLW PIT-02-PRS TNK-01-LVL\nKeywords: seal leak, flow reduction, pressure reduction, mechanical seal failure, casing seal breach, loss of containment\nReference Limits: {\"min_flow_limit\": 50.0, \"unit_flow\": \"L/min\", \"min_pressure_limit\": 3.5, \"unit_pressure\": \"bar\", \"nominal_baseline\": \"Flow 75-90 L/min, Pressure 4.2-5.2 bar\"}\nProcedure Steps:\n1. Identify simultaneous drops in discharge flow FIT-02-FLW (<50 L/min) and pressure PIT-02-PRS (<3.5 bar).\n2. Inspect pump casing seal chamber and drain basin for liquid pooling or vapor plume.\n3. Check suction buffer tank TNK-01-LVL to rule out feed loss or upstream cavitation.\n4. Throttle discharge isolation valve to prevent reverse flow and isolate auxiliary flush lines.\n5. Switch service to standby auxiliary feed pump Pump-01 if running.\n6. Depressurize Pump-02 fluid end and lock out pump motor for mechanical seal replacement.",
+    "Title: Diagnostic Procedure for Isolated Instrument Sensor Faults\nSOP ID: SOP-GEN-SEN-01\nEquipment: Generic\nApplicable Tags: PIT-02-PRS FIT-02-FLW CMP-01-VIB TNK-01-LVL\nKeywords: sensor fault, transmitter spike, false positive, isolated anomaly, instrument malfunction, loop integrity, signal drift\nReference Limits: {\"rate_of_change_threshold\": \"30% excursion in < 2 seconds with zero causal correlation\", \"action\": \"Sensor diagnostics and plausibility cross-check\"}\nProcedure Steps:\n1. Verify if tag excursion occurs without any upstream or downstream deviation in the causal topology.\n2. Inspect 4-20mA loop integrity, terminal wiring, and power supply on transmitter junction box.\n3. Perform local field gauge cross-check to verify whether physical process variable is actually deviant.\n4. If local reading matches nominal baseline, place DCS loop in manual mode and flag transmitter for recalibration.\n5. Replace faulty sensor cartridge or signal conditioner and perform zero/span calibration prior to re-enabling alarms.",
+    "Title: Pump-02 Throttling Valve Restriction Remediation\nSOP ID: SOP-P02-VLV-01\nEquipment: Pump-02\nApplicable Tags: VLV-04-POS FIT-02-FLW MOT-02-CUR PIT-02-PRS ALM-P02-HP\nKeywords: valve restriction, flow reduction, motor current surge, pressure surge, high pressure alarm, discharge throttle, line overpressure\nReference Limits: {\"max_trip_limit\": 6.5, \"unit\": \"bar\", \"parameter\": \"discharge_pressure\", \"nominal_baseline\": \"4.2 - 5.2 bar\"}\nProcedure Steps:\n1. Silence and acknowledge high pressure alarm ALM-P02-HP on supervisory HMI panel.\n2. Inspect throttling control valve VLV-04-POS position feedback against automated DCS output.\n3. If VLV-04-POS is pinched or restricted below 70%, switch loop to manual bypass mode.\n4. Monitor discharge flow transmitter FIT-02-FLW to verify volumetric recovery above 75 L/min.\n5. Verify motor current MOT-02-CUR subsides below 8.2 A nominal threshold.\n6. Once discharge line pressure PIT-02-PRS stabilizes below 5.2 bar, reset ALM-P02-HP and restore cascade control."
+  ],
+  "embeddings": []
+}
