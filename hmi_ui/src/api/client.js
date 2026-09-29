@@ -4,7 +4,10 @@
  * Strict adherence to the Shared System Contract schemas.
  */
 
-const API_BASE = 'http://localhost:8000/api';
+// In EOTE/Web Browser deployments the OpsLens UI may be hosted on a different
+// edge PC than the HMI runtime. Set VITE_API_BASE_URL to that edge host; the
+// localhost default keeps the all-in-one development setup unchanged.
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
 
 export async function getSop(sopId) {
   const res = await fetch(`${API_BASE}/sops/${encodeURIComponent(sopId)}`);
