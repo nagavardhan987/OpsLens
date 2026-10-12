@@ -15,7 +15,7 @@ import json
 import asyncio
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -307,8 +307,11 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
         Returns: connection status, collection name, chunk count, embedding model.
         """
         try:
-            from vector_store.qdrant_store import QdrantVectorStore
-            store = QdrantVectorStore()
+            # Reuse the same persistent client as SOP retrieval. Creating a
+            # second embedded client for the same Qdrant path fails because
+            # embedded Qdrant locks its storage directory to one client.
+            from sop_retriever import get_qdrant_store
+            store = get_qdrant_store()
             h = store.health()
             return {
                 **h,
@@ -322,6 +325,63 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
         except Exception as e:
             return {"vector_store": "qdrant", "connected": False, "error": str(e)}
 
+    @router.get("/sops/library")
+    async def get_sop_library():
+        """List bundled procedures and PDFs indexed on this edge computer."""
+        from pdf_sop_ingestion import list_sop_library
+        return {"documents": list_sop_library()}
+
+    @router.post("/sops/ingest-pdf")
+    async def upload_sop_pdf(
+        request: Request,
+        sop_id: str = Query(..., min_length=1),
+        title: str = Query(..., min_length=1),
+        equipment: str = Query(""),
+        equipment_type: str = Query(""),
+        plant_area: str = Query(""),
+        revision: str = Query("1.0"),
+        effective_date: str = Query(""),
+        filename: str = Query("sop.pdf"),
+    ):
+        """Ingest a local PDF body with SOP metadata passed as query fields."""
+        content_type = request.headers.get("content-type", "").lower()
+        if "application/pdf" not in content_type:
+            raise HTTPException(status_code=415, detail="Upload the PDF as an application/pdf request body.")
+        metadata = {
+            "sop_id": sop_id,
+            "title": title,
+            "equipment": equipment,
+            "equipment_type": equipment_type,
+            "plant_area": plant_area,
+            "revision": revision,
+            "effective_date": effective_date,
+        }
+        try:
+            pdf_bytes = await request.body()
+            from pdf_sop_ingestion import ingest_pdf
+            from sop_retriever import get_qdrant_store
+            result = ingest_pdf(pdf_bytes, filename, metadata, get_qdrant_store())
+            return {"status": "indexed", "data": result}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"SOP ingestion failed: {exc}")
+
+    @router.get("/sops/{sop_id}/source")
+    async def get_sop_source_pdf(sop_id: str):
+        """Serve the preserved original PDF from local edge storage."""
+        from pdf_sop_ingestion import get_pdf_path
+        path = get_pdf_path(sop_id)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail=f"No source PDF is stored for SOP '{sop_id}'.")
+        return FileResponse(
+            path,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{path.name}"'},
+        )
+
     @router.get("/sops/{sop_id}")
     async def get_sop(sop_id: str):
         """
@@ -330,11 +390,18 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
         Frontend must NOT hardcode SOP steps — it must call this endpoint.
         """
         try:
-            from vector_store.qdrant_store import QdrantVectorStore
-            store = QdrantVectorStore()
+            # The retriever owns the process-wide embedded Qdrant client.
+            # Reuse it instead of opening the same local storage a second time.
+            from sop_retriever import get_qdrant_store
+            store = get_qdrant_store()
             doc = store.get_document(sop_id)
-            if doc:
+            if doc and (doc.get("steps") or doc.get("content_pages")):
                 return {"status": "found", "sop_id": sop_id, "data": doc}
+            if doc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"SOP '{sop_id}' exists in Qdrant but has no procedure steps. Re-ingest the SOP document.",
+                )
             raise HTTPException(status_code=404, detail=f"SOP '{sop_id}' not found.")
         except HTTPException:
             raise

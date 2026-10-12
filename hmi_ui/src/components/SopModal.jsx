@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { X, BookOpen, CheckCircle, ShieldCheck } from 'lucide-react';
-import { getSop } from '../api/client';
+import { getSop, getSopSourceUrl } from '../api/client';
 
 export default function SopModal({ isOpen, onClose, sopData }) {
   const [document, setDocument] = useState(null);
@@ -21,6 +21,8 @@ export default function SopModal({ isOpen, onClose, sopData }) {
   if (!isOpen) return null;
 
   const steps = (document?.steps || []).map((instruction, idx) => ({ step_number: idx + 1, instruction }));
+  const contentPages = document?.content_pages || [];
+  const hasPdfSource = Boolean(document?.source_pdf);
   const why = sopData?.why_retrieved || {};
   const toggleStep = (n) => setCheckedSteps((prev) => ({ ...prev, [n]: !prev[n] }));
   return (
@@ -43,7 +45,9 @@ export default function SopModal({ isOpen, onClose, sopData }) {
         <div className="p-5 overflow-y-auto space-y-4">
           <div className="bg-[#0E1624] border border-blue-500/30 rounded-lg p-3 text-xs text-slate-300 flex items-center gap-3">
             <ShieldCheck className="w-5 h-5 text-blue-400 shrink-0" />
-            <div><strong className="text-white block font-industrial">OPERATING DIRECTIVE:</strong>{document?.summary || document?.description || `Source: ${document?.source || 'SOP document store'}`}</div>
+            <div className="min-w-0 flex-1"><strong className="text-white block font-industrial">OPERATING DIRECTIVE:</strong>{document?.summary || document?.description || `Source: ${document?.source || 'SOP document store'}`}
+              {hasPdfSource && <a href={getSopSourceUrl(sopId)} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1.5 font-semibold text-blue-300 hover:text-blue-200">Source PDF: {document.source_pdf} <span aria-hidden="true">↗</span></a>}
+            </div>
           </div>
 
           {sopData?.why_retrieved && <div className="bg-[#121A28] border border-slate-700 rounded-lg p-4">
@@ -53,7 +57,6 @@ export default function SopModal({ isOpen, onClose, sopData }) {
                 ['Incident', why.incident], ['Equipment', why.equipment], ['Alarm', why.alarm],
                 ['Matching symptoms', Array.isArray(why.symptoms) ? why.symptoms.map((symptom) => `✓ ${symptom}`).join('\n') : why.symptoms],
                 ['Likely contributor', why.likely_contributor], ['Relevant section', why.matching_section],
-                ['Semantic relevance', sopData.semantic_similarity?.toFixed?.(4)],
                 ['Retrieval method', sopData.retrieval_method === 'qdrant_vector_search' ? 'Qdrant semantic search' : sopData.retrieval_method],
                 ['Embedding', sopData.embedding_model || 'all-MiniLM-L6-v2']
               ].filter(([, value]) => value !== undefined && value !== null && value !== '').map(([label, value]) => <div key={label} className="flex justify-between gap-2"><span className="text-slate-400">{label}:</span><span className="text-slate-100 text-right whitespace-pre-line">{String(value)}</span></div>)}
@@ -61,9 +64,15 @@ export default function SopModal({ isOpen, onClose, sopData }) {
           </div>}
 
           <div className="space-y-3">
-            <h4 className="text-xs font-mono-code uppercase tracking-wider text-slate-400 font-bold">Procedure ({steps.length} Steps)</h4>
+            <h4 className="text-xs font-mono-code uppercase tracking-wider text-slate-400 font-bold">{contentPages.length ? `Extracted SOP text (${contentPages.length} pages)` : `Procedure (${steps.length} Steps)`}</h4>
             {loading && <p className="text-xs text-slate-400">Loading procedure from SOP store…</p>}
             {loadError && <p className="text-xs text-amber-300">Procedure unavailable: {loadError}</p>}
+            {!loading && !loadError && contentPages.map((page) => (
+              <article key={page.page} className="rounded-lg border border-slate-700/80 bg-[#182335] p-4">
+                <h5 className="mb-2 text-[10px] font-mono-code uppercase tracking-wider text-blue-300">PDF source · Page {page.page}</h5>
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-200">{page.text}</p>
+              </article>
+            ))}
             {!loading && !loadError && steps.map((step) => {
               const checked = !!checkedSteps[step.step_number];
               return <div key={step.step_number} onClick={() => toggleStep(step.step_number)} className={`p-3.5 rounded-lg border transition-all cursor-pointer ${checked ? 'bg-emerald-950/20 border-emerald-500/60' : 'bg-[#182335] border-slate-700/80 hover:border-slate-500'}`}>
@@ -77,7 +86,7 @@ export default function SopModal({ isOpen, onClose, sopData }) {
         </div>
 
         <div className="bg-[#162234] px-5 py-3.5 border-t border-slate-700 flex items-center justify-between">
-          <span className="text-xs font-mono-code text-slate-400">{Object.values(checkedSteps).filter(Boolean).length} of {steps.length} steps verified</span>
+          <span className="text-xs font-mono-code text-slate-400">{contentPages.length ? `${document?.source_pdf || 'PDF SOP'} · ${contentPages.length} source pages` : `${Object.values(checkedSteps).filter(Boolean).length} of ${steps.length} steps verified`}</span>
           <button onClick={onClose} className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-white font-industrial font-semibold text-xs uppercase tracking-wider cursor-pointer transition-colors">Close SOP Viewer</button>
         </div>
       </div>

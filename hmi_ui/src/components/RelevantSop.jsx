@@ -14,8 +14,6 @@ export default function RelevantSop({ sopData, onOpenSopModal, isIncident = fals
   const sopId    = sopData?.sop_id || sopData?.sop?.sop_id || '—';
   const title    = sopData?.sop_title || sopData?.title || sopData?.sop?.title || 'Operating Procedure';
   const steps    = sopData?.steps || sopData?.sop?.steps || [];
-  const rawScore = sopData?.semantic_similarity ?? null;
-  const method   = sopData?.retrieval_method || 'qdrant_vector_search';
 
   return (
     <div className="rounded-xl border border-[#1a2535] bg-[#0d1420] p-5 flex flex-col justify-between">
@@ -25,14 +23,6 @@ export default function RelevantSop({ sopData, onOpenSopModal, isIncident = fals
           <div className="text-[10px] font-mono uppercase tracking-widest text-blue-400">Matched SOP</div>
           <div className="text-sm font-bold text-white mt-0.5">{sopId}</div>
         </div>
-        {rawScore !== null && (
-          <div className="text-right">
-            <div className="text-[9px] font-mono uppercase tracking-wider text-slate-500">Semantic relevance</div>
-            <span className="text-[11px] font-mono font-bold px-2 py-1 rounded border bg-blue-500/10 border-blue-500/30 text-blue-400">
-              {rawScore.toFixed(4)}
-            </span>
-          </div>
-        )}
       </div>
 
       {/* Title block */}

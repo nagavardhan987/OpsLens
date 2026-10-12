@@ -184,22 +184,29 @@ class QdrantVectorStore(VectorStore):
         self._ensure_client()
         from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-        results = self._client.scroll(
-            collection_name=self.collection,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="sop_id", match=MatchValue(value=sop_id))]
-            ),
-            limit=200,
-            with_payload=True,
-        )
-        points, _ = results
+        points = []
+        offset = None
+        while True:
+            batch, next_offset = self._client.scroll(
+                collection_name=self.collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="sop_id", match=MatchValue(value=sop_id))]
+                ),
+                limit=200,
+                offset=offset,
+                with_payload=True,
+            )
+            points.extend(batch)
+            if next_offset is None:
+                break
+            offset = next_offset
         if not points:
             return None
 
         # Reconstruct SOP from chunks
         chunks = sorted(
             [p.payload for p in points],
-            key=lambda x: (x.get("page", 1), x.get("chunk_id", ""))
+            key=lambda x: (x.get("page", 1), x.get("chunk_number", 0), x.get("chunk_id", ""))
         )
         first = chunks[0] if chunks else {}
         return {
@@ -211,10 +218,21 @@ class QdrantVectorStore(VectorStore):
             "revision": first.get("revision", "1.0"),
             "effective_date": first.get("effective_date", ""),
             "source": first.get("source", "OpsLens SOP Knowledge Base"),
+            "source_pdf": first.get("source_pdf"),
+            "page_count": first.get("page_count"),
             "keywords": first.get("keywords", []),
             "reference_limits": first.get("reference_limits", {}),
             "tags": first.get("tags", []),
             "steps": [c.get("instruction", c.get("text", "")) for c in chunks if c.get("section") == "step"],
+            "content_pages": [
+                {"page": page, "text": "\n\n".join(
+                    c.get("text", "") for c in chunks
+                    if c.get("section") == "content" and c.get("page") == page
+                )}
+                for page in sorted({
+                    c.get("page", 1) for c in chunks if c.get("section") == "content"
+                })
+            ],
             "chunks": chunks,
         }
 

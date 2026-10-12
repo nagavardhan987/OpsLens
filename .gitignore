@@ -70,3 +70,6 @@ secrets.json
 # Embedding model cache (large — download on first run)
 sentence-transformers/
 .cache/
+
+# Local embedded Qdrant runtime data (created on this edge PC)
+edge_intelligence/qdrant_data/

@@ -122,8 +122,29 @@ python server.py
 cd hmi_ui
 npm install
 npm run dev
-# Vite dev server at http://localhost:5173
+# Operator HMI at http://localhost:5173 (keep this page focused on operators)
 ```
+
+In a second terminal, start the local engineering console:
+
+```bash
+cd hmi_ui
+npm run dev:console
+# Scenario Lab and SOP Library at http://localhost:5174
+```
+
+### Add a PDF SOP
+
+1. Start the FastAPI backend and the engineering console as above, then open `http://localhost:5174`.
+2. Select **SOP LIBRARY** in the top navigation.
+3. Choose a text-based PDF (maximum 25 MB) and enter its SOP ID and title. Equipment and plant area help metadata-aware semantic retrieval.
+4. Select **INGEST SOP PDF**. OpsLens extracts text locally, splits it by page, embeds it with `all-MiniLM-L6-v2`, stores the original PDF under `edge_intelligence/sop_documents/ingested_pdfs/`, and indexes the chunks in local Qdrant.
+5. Confirm the result shows **Indexed in Qdrant** and a chunk count. The available-document list marks the SOP as **PDF · QDRANT**.
+6. When an incident retrieves that SOP, use **VIEW FULL PROCEDURE** to read the extracted pages and open the preserved source PDF.
+
+Scanned/image-only PDFs are rejected with an OCR-required message. OCR is not enabled yet. Re-ingesting an existing SOP ID replaces its indexed chunks and source PDF after confirmation.
+
+The local API endpoints are `GET /api/sops/library`, `POST /api/sops/ingest-pdf`, `GET /api/sops/{sop_id}`, and `GET /api/sops/{sop_id}/source`.
 
 ### Run Tests
 

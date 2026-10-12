@@ -15,6 +15,28 @@ export async function getSop(sopId) {
   return res.json();
 }
 
+export async function listSopLibrary() {
+  const res = await fetch(`${API_BASE}/sops/library`);
+  if (!res.ok) throw new Error(`Failed to load SOP library: ${res.statusText}`);
+  return res.json();
+}
+
+export async function ingestSopPdf(file, metadata) {
+  const params = new URLSearchParams({ ...metadata, filename: file.name });
+  const res = await fetch(`${API_BASE}/sops/ingest-pdf?${params}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/pdf' },
+    body: file,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `PDF ingestion failed: ${res.statusText}`);
+  return data;
+}
+
+export function getSopSourceUrl(sopId) {
+  return `${API_BASE}/sops/${encodeURIComponent(sopId)}/source`;
+}
+
 /**
  * Fetch list of registered scenarios.
  */

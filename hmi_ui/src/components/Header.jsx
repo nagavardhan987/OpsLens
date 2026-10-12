@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { AlertTriangle, CheckCircle2, RotateCcw, Play, Zap, X, Clock, Tag, Layers, RefreshCw } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, X, Clock, Tag, Layers } from 'lucide-react';
 
 export default function Header({
   machineStatus,
@@ -181,92 +181,6 @@ export default function Header({
           )}
         </div>
 
-        {/* Right: Controls */}
-        <div className="flex items-center gap-2 shrink-0">
-          {/* Scenario selector */}
-          <select
-            value={selectedScenario}
-            onChange={(e) => onSelectScenario(e.target.value)}
-            disabled={simulating || isIncident}
-            className="h-8 px-2.5 bg-[#111827] border border-[#1a2535] text-slate-300 text-xs rounded-lg focus:outline-none focus:border-[#00A344]/50 cursor-pointer disabled:opacity-50 max-w-[200px]"
-          >
-            {scenarios.length > 0 ? (
-              scenarios.map((sc) => (
-                <option key={sc.scenario_id} value={sc.scenario_id} className="bg-[#111827]">
-                  {sc.name || sc.scenario_id}
-                </option>
-              ))
-            ) : (
-              <>
-                <option value="valve_restriction"    className="bg-[#111827]">Pump-02 Valve Restriction</option>
-                <option value="bearing_wear"         className="bg-[#111827]">Compressor-01 Bearing Wear</option>
-                <option value="seal_leak"            className="bg-[#111827]">Pump-02 Seal Leak</option>
-                <option value="sensor_fault"         className="bg-[#111827]">Filter-01 Sensor Fault</option>
-                <option value="tank_overflow"        className="bg-[#111827]">Tank-01 High Level</option>
-                <option value="compressor_overspeed" className="bg-[#111827]">Compressor-01 Overspeed</option>
-                <option value="pump_cavitation"      className="bg-[#111827]">Pump-02 Cavitation</option>
-              </>
-            )}
-          </select>
-
-          {/* Pacing toggle */}
-          <div className="flex items-center h-8 bg-[#111827] border border-[#1a2535] rounded-lg p-0.5 text-xs">
-            <button
-              onClick={() => setPacingMode('animated')}
-              className={`px-2.5 h-full rounded-md text-[11px] font-medium transition-all ${
-                pacingMode === 'animated' ? 'bg-[#00A344] text-black font-bold' : 'text-slate-400 hover:text-white'
-              }`}
-            >Cascade</button>
-            <button
-              onClick={() => setPacingMode('instant')}
-              className={`px-2.5 h-full rounded-md text-[11px] font-medium transition-all ${
-                pacingMode === 'instant' ? 'bg-[#00A344] text-black font-bold' : 'text-slate-400 hover:text-white'
-              }`}
-            >Instant</button>
-          </div>
-
-          {/* Sim progress */}
-          {simulating && (
-            <div className="flex items-center gap-1.5 h-8 px-2.5 bg-blue-500/10 border border-blue-500/30 rounded-lg text-xs text-blue-400">
-              <Zap className="w-3 h-3 animate-spin" />
-              <span>{simStep}/{totalSteps}</span>
-            </div>
-          )}
-
-          {/* Fire Scenario */}
-          <button
-            onClick={onStartIncident}
-            disabled={simulating || isIncident}
-            className={`h-8 px-4 rounded-lg font-bold text-xs uppercase tracking-wider flex items-center gap-1.5 transition-all ${
-              isIncident
-                ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
-                : 'bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-900/30 cursor-pointer'
-            }`}
-          >
-            <Play className="w-3 h-3 fill-current" />
-            Fire Scenario
-          </button>
-
-          {/* Reset Scenario — resets current scenario state without full demo reset */}
-          <button
-            onClick={onResetScenario}
-            disabled={simulating && !isIncident}
-            title="Reset current scenario (keeps demo state)"
-            className="h-8 px-3 rounded-lg text-xs font-medium flex items-center gap-1.5 bg-amber-900/30 hover:bg-amber-900/50 text-amber-300 border border-amber-500/30 cursor-pointer transition-all"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            Reset Scenario
-          </button>
-
-          {/* Full Reset */}
-          <button
-            onClick={onResetDemo}
-            className="h-8 px-3 rounded-lg text-xs font-medium flex items-center gap-1.5 bg-[#111827] hover:bg-[#1a2535] text-slate-300 border border-[#1a2535] cursor-pointer transition-all"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            Reset
-          </button>
-        </div>
       </div>
     </header>
   );

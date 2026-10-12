@@ -15,18 +15,13 @@ import {
   getOpenEvents,
   logOperatorAction,
   compileHandover,
-  listScenarios,
-  runScenario,
-  resetDemo,
-  getSystemStatus
 } from './api/client';
 
 export default function App() {
   const [fullEvent, setFullEvent] = useState(null);
   const [currentEventId, setCurrentEventId] = useState(null);
   const [handover, setHandover] = useState(null);
-  const [scenarios, setScenarios] = useState([]);
-  const [selectedScenario, setSelectedScenario] = useState('valve_restriction');
+  const selectedScenario = 'valve_restriction';
 
   const [isIncident, setIsIncident] = useState(false);
   const [simulating, setSimulating] = useState(false);
@@ -38,6 +33,7 @@ export default function App() {
   const [isHandoverModalOpen, setIsHandoverModalOpen] = useState(false);
 
   const timersRef = useRef([]);
+  const currentEventIdRef = useRef(null);
 
   const clearAllTimers = () => {
     timersRef.current.forEach(t => { clearTimeout(t); clearInterval(t); });
@@ -66,10 +62,40 @@ export default function App() {
 
   const handleLiveEvent = useCallback(async (payload) => {
     const eventId = payload.event_id || (payload.data && payload.data.event_id);
-    if (!eventId) return;
+    if (!eventId || eventId === currentEventIdRef.current) return;
     try {
       const full = await getFullEvent(eventId);
       if (full) {
+        currentEventIdRef.current = eventId;
+        setCurrentEventId(eventId);
+        setFullEvent(full);
+        setIsIncident(true);
+        triggerCascade(full.story?.steps?.length || 5);
+        refreshHandover();
+      }
+    } catch (_) {}
+  }, [triggerCascade, refreshHandover]);
+
+  // Poll the active-event endpoint as a recovery path if a browser connects
+  // after an SSE notification or briefly loses its EventSource connection.
+  const refreshActiveIncident = useCallback(async () => {
+    try {
+      const open = await getOpenEvents();
+      if (!open.length) {
+        if (currentEventIdRef.current) {
+          currentEventIdRef.current = null;
+          setCurrentEventId(null);
+          setFullEvent(null);
+          setIsIncident(false);
+          setSimStep(0);
+        }
+        return;
+      }
+      const eventId = open[open.length - 1].event_id;
+      if (!eventId || eventId === currentEventIdRef.current) return;
+      const full = await getFullEvent(eventId);
+      if (full) {
+        currentEventIdRef.current = eventId;
         setCurrentEventId(eventId);
         setFullEvent(full);
         setIsIncident(true);
@@ -80,63 +106,13 @@ export default function App() {
   }, [triggerCascade, refreshHandover]);
 
   useEffect(() => {
-    let unsub = () => {};
-    const init = async () => {
-      try { const sc = await listScenarios(); if (sc?.length) { setScenarios(sc); setSelectedScenario(sc[0].scenario_id); } } catch (_) {}
-      await refreshHandover();
-      try {
-        const open = await getOpenEvents();
-        if (open?.length) {
-          const full = await getFullEvent(open[open.length - 1].event_id);
-          if (full) { setCurrentEventId(open[open.length - 1].event_id); setFullEvent(full); setIsIncident(true); setSimStep(7); }
-        }
-      } catch (_) {}
-      unsub = subscribeToEventStream(handleLiveEvent, () => {});
-    };
-    init();
-    return () => { clearAllTimers(); unsub(); };
-  }, [handleLiveEvent, refreshHandover]);
-
-  const handleStartIncident = async () => {
-    clearAllTimers();
-    setSimulating(true);
-    setRecordedAction(null);
-    try {
-      const poll = setInterval(async () => {
-        try {
-          const open = await getOpenEvents();
-          if (open?.length) {
-            const full = await getFullEvent(open[open.length - 1].event_id);
-            if (full) { setCurrentEventId(open[open.length - 1].event_id); setFullEvent(full); setIsIncident(true); refreshHandover(); }
-          }
-        } catch (_) {}
-      }, 1000);
-      timersRef.current.push(poll);
-      await runScenario(selectedScenario, 10.0);
-      clearInterval(poll);
-      const open = await getOpenEvents();
-      if (open?.length) {
-        const full = await getFullEvent(open[open.length - 1].event_id);
-        if (full) { setCurrentEventId(open[open.length - 1].event_id); setFullEvent(full); setIsIncident(true); triggerCascade(full.story?.steps?.length || 5); await refreshHandover(); }
-      }
-    } catch (err) { console.error(err); setSimulating(false); }
-  };
-
-  const handleResetDemo = async () => {
-    clearAllTimers();
-    setSimulating(false); setSimStep(0); setIsIncident(false);
-    setCurrentEventId(null); setFullEvent(null); setRecordedAction(null);
-    setIsSopModalOpen(false); setIsHandoverModalOpen(false);
-    try { await resetDemo(); await refreshHandover(); } catch (_) {}
-  };
-
-  // Reset just the current scenario state — clears incident but keeps demo session
-  const handleResetScenario = async () => {
-    clearAllTimers();
-    setSimulating(false); setSimStep(0); setIsIncident(false);
-    setCurrentEventId(null); setFullEvent(null); setRecordedAction(null);
-    try { await resetDemo(); await refreshHandover(); } catch (_) {}
-  };
+    // Subscribe synchronously before any API calls to avoid a startup race.
+    const unsub = subscribeToEventStream(handleLiveEvent, () => {});
+    refreshHandover();
+    refreshActiveIncident();
+    const poll = setInterval(refreshActiveIncident, 2500);
+    return () => { clearAllTimers(); clearInterval(poll); unsub(); };
+  }, [handleLiveEvent, refreshActiveIncident, refreshHandover]);
 
   const handleOperatorAction = async (actionType, notes) => {
     if (!currentEventId) return;
@@ -172,18 +148,7 @@ export default function App() {
       <Header
         machineStatus={{ status: isIncident ? 'CRITICAL_ALARM' : 'NOMINAL', primary_alarm: isIncident && Boolean(fullEvent?.candidate?.primary_alarm) }}
         isIncident={isIncident}
-        simulating={simulating}
-        simStep={simStep}
-        totalSteps={(fullEvent?.story?.steps?.length || 5) + 2}
-        pacingMode={pacingMode}
-        setPacingMode={setPacingMode}
-        onStartIncident={handleStartIncident}
-        onResetDemo={handleResetDemo}
-        onResetScenario={handleResetScenario}
         operatorName="J. Rivera (Shift 2)"
-        scenarios={scenarios}
-        selectedScenario={selectedScenario}
-        onSelectScenario={setSelectedScenario}
         equipmentId={equipmentId}
         primaryTag={primaryTag}
         causalLabel={causalLabel}
