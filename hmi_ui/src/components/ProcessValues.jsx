@@ -1,134 +1,143 @@
 import React from 'react';
-import { ArrowDown, ArrowUp, Activity, Gauge, Disc, Sliders } from 'lucide-react';
+import { Activity, ArrowDownRight, ArrowUpRight, Gauge, Minus, SlidersHorizontal, Zap } from 'lucide-react';
+import { getEquipmentProcessTags } from '../lib/equipmentPresentation';
 
-const TAG_META = {
-  'VLV-04-POS': { name: 'Valve Position',       unit: '%',    icon: Sliders,  max: 100 },
-  'FIT-02-FLW': { name: 'Flow Rate',             unit: 'L/m',  icon: Activity, max: 100 },
-  'MOT-02-CUR': { name: 'Motor Current',         unit: 'A',    icon: Disc,     max: 12  },
-  'PIT-02-PRS': { name: 'Line Pressure',         unit: 'bar',  icon: Gauge,    max: 8   },
-  'CMP-01-VIB': { name: 'Vibration',             unit: 'mm/s', icon: Gauge,    max: 12  },
-  'CMP-01-TMP': { name: 'Bearing Temp',          unit: '°C',   icon: Gauge,    max: 100 },
-  'CMP-01-RPM': { name: 'Shaft Speed',           unit: 'RPM',  icon: Disc,     max: 3500},
-  'CMP-01-SPD': { name: 'Shaft Speed',           unit: 'RPM',  icon: Disc,     max: 3600},
-  'CMP-01-CUR': { name: 'Stator Current',        unit: 'A',    icon: Disc,     max: 80  },
-  'CMP-01-PWR': { name: 'Compressor Power',      unit: 'kW',   icon: Activity, max: 80  },
-  'FILT-01-DP': { name: 'Filter ΔP',             unit: 'bar',  icon: Gauge,    max: 2   },
-  'TNK-01-LVL': { name: 'Tank Level',            unit: '%',    icon: Gauge,    max: 100 },
+const TAG_ICONS = {
+  'FIT-02-FLW': Activity,
+  'PIT-02-PRS': Gauge,
+  'MOT-02-CUR': Zap,
+  'VLV-04-POS': SlidersHorizontal,
+  'CMP-01-SPD': Gauge,
+  'CMP-01-VIB': Activity,
+  'CMP-01-CUR': Zap,
+  'CMP-01-TMP': Gauge,
+  'TNK-01-LVL': Activity,
 };
 
-function getTagMeta(tag) {
-  if (TAG_META[tag]) return TAG_META[tag];
-  if (tag.includes('VLV')) return { name: tag, unit: '%',  icon: Sliders,  max: 100 };
-  if (tag.includes('FLW') || tag.includes('FIT')) return { name: tag, unit: 'L/m', icon: Activity, max: 100 };
-  return { name: tag, unit: 'u', icon: Gauge, max: 100 };
+function formatTimestamp(value) {
+  if (!value || !Number.isFinite(Date.parse(value))) return 'Timestamp unavailable';
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+  }).format(new Date(value));
 }
 
-const PUMP_FALLBACK = [
-  { id: 'VLV-04-POS', tag: 'VLV-04-POS', value: '78',   unit: '%',   bar: 78, deviated: false, critical: false, delta: null, trend: null },
-  { id: 'FIT-02-FLW', tag: 'FIT-02-FLW', value: '82',   unit: 'L/m', bar: 82, deviated: false, critical: false, delta: null, trend: null },
-  { id: 'MOT-02-CUR', tag: 'MOT-02-CUR', value: '7.8',  unit: 'A',   bar: 65, deviated: false, critical: false, delta: null, trend: null },
-  { id: 'PIT-02-PRS', tag: 'PIT-02-PRS', value: '4.8',  unit: 'bar', bar: 60, deviated: false, critical: false, delta: null, trend: null },
-];
+function formatValue(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
 
-const COMP_FALLBACK = [
-  { id: 'CMP-01-VIB', tag: 'CMP-01-VIB', value: '1.8',   unit: 'mm/s', bar: 22, deviated: false, critical: false, delta: null, trend: null },
-  { id: 'CMP-01-TMP', tag: 'CMP-01-TMP', value: '62.0',  unit: '°C',   bar: 62, deviated: false, critical: false, delta: null, trend: null },
-  { id: 'CMP-01-RPM', tag: 'CMP-01-RPM', value: '2980',  unit: 'RPM',  bar: 85, deviated: false, critical: false, delta: null, trend: null },
-  { id: 'CMP-01-PWR', tag: 'CMP-01-PWR', value: '45.0',  unit: 'kW',   bar: 56, deviated: false, critical: false, delta: null, trend: null },
-];
+function getObserved(event, tag, unit = '') {
+  const scored = event?.evidence_audit?.scoring_breakdown?.tag_scores?.[tag]?.observed_reading;
+  const step = [...(event?.story?.steps || [])].reverse().find((item) => item.tag === tag && typeof item.value_after === 'number');
+  if (scored && typeof scored.value === 'number') return { ...scored, unit: scored.unit || unit, value_before: step?.value_before, source: 'Evidence Engine record' };
+  if (step) return { value: step.value_after, unit: unit || step.unit || '', timestamp: step.timestamp, source: 'Event story record', value_before: step.value_before };
+  return null;
+}
 
-export default function ProcessValues({ revealedStep = 5, isIncident = false, storySteps = [], equipmentId = 'Pump-02', primaryTag = null }) {
-  let items = [];
-
-  const analogSteps = storySteps.filter(s => !s.tag.startsWith('ALM-'));
-
-  if (isIncident && analogSteps.length > 0) {
-    const tagMap = new Map();
-    analogSteps.forEach(s => { if (!tagMap.has(s.tag) || s.tag === primaryTag) tagMap.set(s.tag, s); });
-
-    items = Array.from(tagMap.values()).map(step => {
-      const meta = getTagMeta(step.tag);
-      const isRevealed = revealedStep >= step.step_number;
-      const val = isRevealed ? step.value_after : step.value_before;
-      const deltaPct = step.value_before ? ((step.value_after - step.value_before) / step.value_before) * 100 : 0;
-      const deviated = isRevealed && Math.abs(deltaPct) > 1;
-      const critical = isRevealed && (step.tag === primaryTag || Math.abs(deltaPct) > 30);
-      return {
-        id: step.tag, tag: step.tag,
-        name: meta.name,
-        value: typeof val === 'number' ? (Number.isInteger(val) ? val.toString() : val.toFixed(1)) : String(val),
-        unit: meta.unit,
-        bar: Math.max(4, Math.min(100, (val / meta.max) * 100)),
-        deviated, critical,
-        delta: `${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(0)}%`,
-        trend: step.value_after < step.value_before ? 'down' : 'up',
-      };
-    });
-  }
-
-
-  if (items.length === 0) {
-    if (equipmentId?.toLowerCase().includes('comp')) {
-      items = COMP_FALLBACK;
-    } else if (equipmentId?.toLowerCase().includes('tank')) {
-      items = [
-        { id: 'TNK-01-LVL', tag: 'TNK-01-LVL', value: '60', unit: '%', bar: 60, deviated: false, critical: false, delta: null, trend: null },
-      ];
-    } else {
-      items = PUMP_FALLBACK;
-    }
-  }
+function MetricCard({ item, reading, event, equipmentId, isEquipmentStatus = false }) {
+  const Icon = TAG_ICONS[item.tag] || item.icon || Activity;
+  const value = isEquipmentStatus ? null : reading?.value;
+  const delta = reading && typeof reading.value_before === 'number' ? reading.value - reading.value_before : null;
+  // Distinguish pp change (% tag) from relative % change
+  const deltaUnit = item.unit === '%' ? 'pp' : item.unit;
+  const isStale = reading?.timestamp && Date.now() - Date.parse(reading.timestamp) > 5 * 60 * 1000;
+  const alarmActive = isEquipmentStatus && event?.runtime_alarm_state?.active === true;
 
   return (
-    <div className="grid grid-cols-4 gap-3">
-      {items.map(item => (
-        <div key={item.id} className={`rounded-xl border p-4 transition-all duration-300 ${
-          item.critical
-            ? 'border-red-500/60 bg-[#150e10]'
-            : item.deviated
-            ? 'border-amber-500/40 bg-[#14120a]'
-            : 'border-[#1a2535] bg-[#0d1420]'
-        }`}>
-          {/* Tag + Name */}
-          <div className="flex items-start justify-between mb-3">
-            <div>
-              <div className="text-[9px] font-mono font-bold uppercase tracking-widest text-slate-500">{item.tag}</div>
-              <div className="text-xs font-medium text-slate-300 mt-0.5">{item.name}</div>
-            </div>
-            {item.deviated && (
-              <span className={`flex items-center gap-0.5 text-[10px] font-bold font-mono px-1.5 py-0.5 rounded ${
-                item.critical ? 'bg-red-500/20 text-red-300' : 'bg-amber-500/20 text-amber-300'
-              }`}>
-                {item.trend === 'down' ? <ArrowDown className="w-2.5 h-2.5" /> : <ArrowUp className="w-2.5 h-2.5" />}
-                {item.delta}
-              </span>
-            )}
-          </div>
-
-          {/* Big value */}
-          <div className={`text-3xl font-black tracking-tight leading-none ${
-            item.critical ? 'text-red-400' : item.deviated ? 'text-amber-300' : 'text-emerald-400'
-          }`}>
-            {item.value}
-            <span className="text-sm font-normal text-slate-500 ml-1">{item.unit}</span>
-          </div>
-
-          {/* Bar */}
-          <div className="mt-3 h-1 bg-[#1a2535] rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all duration-500 ${
-                item.critical ? 'bg-red-500' : item.deviated ? 'bg-amber-400' : 'bg-emerald-500'
-              }`}
-              style={{ width: `${item.bar}%` }}
-            />
-          </div>
-
-          {/* Status */}
-          {!item.deviated && (
-            <div className="mt-1.5 text-[10px] text-emerald-600 font-mono">Nominal</div>
-          )}
+    <article className={`metric-card flex flex-col justify-between${alarmActive ? ' alarm' : ''}`}>
+      {/* Label + icon row */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="metric-label truncate">{item.label}</p>
+          <p className="metric-tag">{isEquipmentStatus ? 'EQUIPMENT OVERVIEW' : item.tag}</p>
         </div>
-      ))}
-    </div>
+        <span className={`metric-icon shrink-0${alarmActive ? ' red' : ''}`}><Icon size={17} /></span>
+      </div>
+
+      {/* Primary value */}
+      <div className={`metric-value-row${isEquipmentStatus ? ' metric-equipment-value-row' : ''}`}>
+        {isEquipmentStatus ? (
+          <>
+            <span className={`metric-value${alarmActive ? ' red-text' : ''}`}>{equipmentId || 'Equipment'}</span>
+            <span className={`metric-state${alarmActive ? ' red' : event?.runtime_alarm_state?.active === false ? ' green' : ' muted'}`}>
+              {alarmActive ? 'Alarm active' : event?.runtime_alarm_state?.active === false ? 'Alarm input clear' : 'State unavailable'}
+            </span>
+          </>
+        ) : reading ? (
+          <>
+            <span className="metric-value">{formatValue(value)}</span>
+            <span className="metric-unit">{reading.unit || item.unit}</span>
+          </>
+        ) : (
+          <span className="metric-empty">No reading recorded</span>
+        )}
+      </div>
+
+      {/* Delta + freshness */}
+      {!isEquipmentStatus && (
+        <div className="metric-foot">
+          {delta !== null ? (
+            <span className={`metric-delta${delta < 0 ? ' down' : delta > 0 ? ' up' : ' flat'}`}>
+              {delta < 0 ? <ArrowDownRight size={13} /> : delta > 0 ? <ArrowUpRight size={13} /> : <Minus size={13} />}
+              {delta > 0 ? '+' : ''}{formatValue(delta)}&thinsp;{deltaUnit}
+              {item.unit === '%' && <span className="ml-1 opacity-60 text-[9px]">pp</span>}
+            </span>
+          ) : <span className="text-slate-600">Change unavailable</span>}
+          {isStale && <span className="freshness stale" title="Last reading more than 5 minutes ago">Stale</span>}
+        </div>
+      )}
+
+      {/* Timestamp — in a collapsed detail so main card stays clean */}
+      {!isEquipmentStatus && reading && (
+        <details className="mt-1 group">
+          <summary className="cursor-pointer text-[9px] text-slate-600 hover:text-slate-400 select-none list-none">
+            <span className="group-open:hidden">Show reading time ▸</span>
+            <span className="hidden group-open:inline">Hide ▴</span>
+          </summary>
+          <div className="mt-1 text-[9px] text-slate-500 leading-relaxed">
+            <div>{formatTimestamp(reading.timestamp)}</div>
+            <div className="text-slate-600">{reading.source || 'Recorded value'}</div>
+            <div className="mt-0.5 text-slate-600 italic">
+              Recorded reading · not guaranteed live telemetry
+            </div>
+          </div>
+        </details>
+      )}
+    </article>
+  );
+}
+
+export default function ProcessValues({ event, equipmentId }) {
+  const configuredTags = getEquipmentProcessTags(event, equipmentId);
+  return (
+    <section id="trends" className="space-y-3" aria-label="Equipment and sensor readings">
+      <div className="section-heading-row">
+        <div>
+          <p className="section-kicker">Equipment overview</p>
+          <h2 className="section-title">{equipmentId || 'Equipment'} process values</h2>
+        </div>
+        <span className="text-[10px] text-slate-500">
+          Recorded readings · not live telemetry
+        </span>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <MetricCard
+          item={{ tag: 'equipment-status', label: 'Equipment status', icon: Activity }}
+          event={event}
+          equipmentId={equipmentId}
+          isEquipmentStatus
+        />
+        {configuredTags.map((item) => (
+          <MetricCard
+            key={item.tag}
+            item={{ ...item, icon: TAG_ICONS[item.tag] || Activity }}
+            reading={getObserved(event, item.tag, item.unit)}
+            event={event}
+            equipmentId={equipmentId}
+          />
+        ))}
+      </div>
+    </section>
   );
 }

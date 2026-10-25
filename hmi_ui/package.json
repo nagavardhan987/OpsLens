@@ -7,7 +7,8 @@
     "dev": "vite",
     "dev:console": "vite workbench --host 0.0.0.0 --port 5174 --strictPort",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test"
   },
   "dependencies": {
     "lucide-react": "^1.16.0",

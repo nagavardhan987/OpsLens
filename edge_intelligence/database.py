@@ -80,9 +80,61 @@ class Database:
                     raw_deviation_pct REAL NOT NULL,
                     clustered_tags TEXT NOT NULL,
                     equipment_id TEXT NOT NULL,
+                    alarm_severity TEXT,
                     status TEXT DEFAULT 'OPEN',
                     updated_at TEXT NOT NULL
                 );
+            """)
+            candidate_columns = {row[1] for row in conn.execute("PRAGMA table_info(candidate_events)")}
+            if "alarm_severity" not in candidate_columns:
+                conn.execute("ALTER TABLE candidate_events ADD COLUMN alarm_severity TEXT")
+            # Phase 2: Additive urgency & lifecycle columns (backward-compatible migration)
+            _urgency_cols = {
+                "source_priority": "TEXT",
+                "urgency_score": "REAL",
+                "urgency_band": "TEXT DEFAULT 'UNKNOWN'",
+                "urgency_reasons": "TEXT",
+                "triggered_rules": "TEXT",
+                "data_quality": "TEXT DEFAULT 'VALID'",
+                "time_to_limit_seconds": "REAL",
+                "repeat_count": "INTEGER DEFAULT 1",
+                "lifecycle_state": "TEXT DEFAULT 'ACTIVE'",
+                "first_seen_timestamp": "TEXT",
+                "last_seen_timestamp": "TEXT",
+                "scoring_breakdown": "TEXT",
+                "ttl_unavailable_reason": "TEXT",
+            }
+            for col, col_type in _urgency_cols.items():
+                if col not in candidate_columns:
+                    conn.execute(f"ALTER TABLE candidate_events ADD COLUMN {col} {col_type}")
+            # Individual alarms table for Layer 3 non-destructive preservation
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS individual_alarms (
+                    alarm_id TEXT PRIMARY KEY,
+                    incident_id TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    equipment_id TEXT NOT NULL,
+                    alarm_type TEXT NOT NULL DEFAULT 'EXCURSION',
+                    value TEXT NOT NULL,
+                    threshold REAL,
+                    source_priority TEXT,
+                    lifecycle_state TEXT NOT NULL DEFAULT 'ACTIVE',
+                    repeat_count INTEGER NOT NULL DEFAULT 1,
+                    first_seen_timestamp TEXT NOT NULL,
+                    last_seen_timestamp TEXT NOT NULL,
+                    cleared_timestamp TEXT,
+                    acknowledged_timestamp TEXT,
+                    fingerprint TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_individual_alarms_incident
+                ON individual_alarms(incident_id);
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_individual_alarms_fingerprint
+                ON individual_alarms(fingerprint);
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_candidate_events_equip
@@ -191,6 +243,20 @@ class Database:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_operator_actions_ts
                 ON operator_actions(timestamp);
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS assistant_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_assistant_messages_convo
+                ON assistant_messages(conversation_id, event_id, id);
             """)
 
     def insert_reading(self, reading: TagReading) -> int:
@@ -319,6 +385,100 @@ class Database:
             )
         return readings
 
+    @staticmethod
+    def _context_query_bounds(start_time: str, end_time: str) -> tuple[str, str]:
+        """Wide indexed bounds; exact UTC filtering happens in ContextBuilder."""
+        from datetime import datetime, timedelta, timezone
+
+        def parse(value: str) -> datetime:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        lower = (parse(start_time) - timedelta(days=2)).date().isoformat() + "T00:00:00"
+        upper = (parse(end_time) + timedelta(days=2)).date().isoformat() + "T23:59:59.999999"
+        return lower, upper
+
+    def get_context_readings(self, equipment_id: str, tags: List[str], start_time: str,
+                             end_time: str) -> List[Dict[str, Any]]:
+        """Read candidate context measurements through indexed equipment/time columns."""
+        if not tags:
+            return []
+        lower, upper = self._context_query_bounds(start_time, end_time)
+        placeholders = ",".join("?" for _ in tags)
+        rows = self._get_connection().execute(
+            f"""SELECT id, tag, value, value_raw, timestamp, unit, equipment_id
+                FROM tag_readings
+                WHERE equipment_id = ? AND tag IN ({placeholders})
+                  AND timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp ASC, id ASC""",
+            (equipment_id, *tags, lower, upper),
+        ).fetchall()
+        results = []
+        for row in rows:
+            raw = row["value_raw"]
+            if raw == "true":
+                value: Union[float, bool, str] = True
+            elif raw == "false":
+                value = False
+            elif row["value"] is not None:
+                value = float(row["value"])
+            else:
+                value = raw
+            results.append({"record_id": row["id"], "tag": row["tag"], "value": value,
+                            "timestamp": row["timestamp"], "unit": row["unit"],
+                            "equipment_id": row["equipment_id"]})
+        return results
+
+    def get_context_events(self, equipment_id: str, start_time: str, end_time: str,
+                           include_event_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Read related alarm/event metadata with status derived from audit actions."""
+        lower, upper = self._context_query_bounds(start_time, end_time)
+        clauses = ["(ce.equipment_id = ? AND ce.trigger_timestamp >= ? AND ce.trigger_timestamp <= ?)"]
+        params: List[Any] = [equipment_id, lower, upper]
+        if include_event_id:
+            clauses.append("ce.event_id = ?")
+            params.append(include_event_id)
+        rows = self._get_connection().execute(
+            f"""SELECT ce.event_id, ce.primary_tag, ce.primary_alarm,
+                       ce.trigger_timestamp, ce.raw_deviation_pct, ce.clustered_tags,
+                       ce.equipment_id, ce.alarm_severity,
+                       CASE
+                         WHEN EXISTS (SELECT 1 FROM operator_actions oa WHERE oa.event_id = ce.event_id
+                           AND UPPER(oa.action_type) IN ('RESOLVE', 'RESOLVED')) THEN 'RESOLVED'
+                         WHEN EXISTS (SELECT 1 FROM operator_actions oa WHERE oa.event_id = ce.event_id
+                           AND UPPER(oa.action_type) IN ('ACKNOWLEDGE', 'ACKNOWLEDGED')) THEN 'ACKNOWLEDGED'
+                         ELSE 'OPEN'
+                       END AS status
+                FROM candidate_events ce WHERE {' OR '.join(clauses)}
+                ORDER BY ce.trigger_timestamp ASC, ce.event_id ASC""",
+            params,
+        ).fetchall()
+        return [{"event_id": row["event_id"], "alarm_id": row["primary_tag"],
+                 "primary_alarm": bool(row["primary_alarm"]), "timestamp": row["trigger_timestamp"],
+                 "raw_deviation_pct": row["raw_deviation_pct"], "tags": json.loads(row["clustered_tags"]),
+                 "equipment_id": row["equipment_id"], "configured_severity": row["alarm_severity"],
+                 "status": row["status"]} for row in rows]
+
+    def get_context_actions(self, event_ids: List[str], start_time: str,
+                            end_time: str) -> List[Dict[str, Any]]:
+        """Read time-windowed actions for selected/related events via the timestamp index."""
+        if not event_ids:
+            return []
+        lower, upper = self._context_query_bounds(start_time, end_time)
+        placeholders = ",".join("?" for _ in event_ids)
+        rows = self._get_connection().execute(
+            f"""SELECT action_id, event_id, operator, action_type, timestamp, notes
+                FROM operator_actions WHERE event_id IN ({placeholders})
+                  AND timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp ASC, action_id ASC""",
+            (*event_ids, lower, upper),
+        ).fetchall()
+        return [{"action_id": row["action_id"], "event_id": row["event_id"],
+                 "operator": row["operator"], "action_type": row["action_type"],
+                 "timestamp": row["timestamp"], "notes": row["notes"]} for row in rows]
+
     def get_latest_reading(self, tag: str) -> Optional[TagReading]:
         """Fetch latest reading for a specific tag."""
         res = self.get_readings(tag=tag, limit=1, order_desc=True)
@@ -342,26 +502,65 @@ class Database:
     def save_candidate_event(self, event: CandidateEvent, equipment_id: str) -> None:
         """
         Upsert a CandidateEvent record in candidate_events table.
+        Writes urgency assessment, lifecycle state, and repeat count when present.
         """
         conn = self._get_connection()
         clustered_json = json.dumps(event.clustered_tags)
         alarm_int = 1 if event.primary_alarm else 0
         updated_ts = event.trigger_timestamp
 
+        # Extract urgency fields from assessment object if present
+        urgency = event.urgency
+        urgency_score = None
+        urgency_band = "UNKNOWN"
+        urgency_reasons_json = None
+        triggered_rules_json = None
+        data_quality = "VALID"
+        time_to_limit_seconds = None
+        if urgency is not None:
+            urgency_score = urgency.urgency_score
+            urgency_band = urgency.urgency_band
+            urgency_reasons_json = json.dumps(urgency.urgency_reasons)
+            triggered_rules_json = json.dumps(urgency.triggered_rules)
+            data_quality = urgency.data_quality
+            if urgency.time_to_limit and urgency.time_to_limit.time_to_limit_seconds is not None:
+                time_to_limit_seconds = urgency.time_to_limit.time_to_limit_seconds
+
+        first_seen = event.first_seen_timestamp or event.trigger_timestamp
+        last_seen = event.last_seen_timestamp or event.trigger_timestamp
+        scoring_breakdown_json = json.dumps(urgency.scoring_breakdown) if urgency and urgency.scoring_breakdown else None
+        ttl_unavailable_reason = urgency.ttl_unavailable_reason if urgency else None
+
         with conn:
             conn.execute(
                 """
                 INSERT INTO candidate_events (
                     event_id, primary_tag, primary_alarm, trigger_timestamp,
-                    raw_deviation_pct, clustered_tags, equipment_id, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+                    raw_deviation_pct, clustered_tags, equipment_id, alarm_severity, status, updated_at,
+                    source_priority, urgency_score, urgency_band, urgency_reasons, triggered_rules,
+                    data_quality, time_to_limit_seconds, repeat_count, lifecycle_state,
+                    first_seen_timestamp, last_seen_timestamp, scoring_breakdown, ttl_unavailable_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(event_id) DO UPDATE SET
                     primary_tag = excluded.primary_tag,
                     primary_alarm = excluded.primary_alarm,
                     trigger_timestamp = excluded.trigger_timestamp,
                     raw_deviation_pct = excluded.raw_deviation_pct,
                     clustered_tags = excluded.clustered_tags,
-                    updated_at = excluded.updated_at
+                    alarm_severity = excluded.alarm_severity,
+                    updated_at = excluded.updated_at,
+                    source_priority = excluded.source_priority,
+                    urgency_score = excluded.urgency_score,
+                    urgency_band = excluded.urgency_band,
+                    urgency_reasons = excluded.urgency_reasons,
+                    triggered_rules = excluded.triggered_rules,
+                    data_quality = excluded.data_quality,
+                    time_to_limit_seconds = excluded.time_to_limit_seconds,
+                    repeat_count = excluded.repeat_count,
+                    lifecycle_state = excluded.lifecycle_state,
+                    last_seen_timestamp = excluded.last_seen_timestamp,
+                    scoring_breakdown = excluded.scoring_breakdown,
+                    ttl_unavailable_reason = excluded.ttl_unavailable_reason
                 """,
                 (
                     event.event_id,
@@ -371,9 +570,78 @@ class Database:
                     event.raw_deviation_pct,
                     clustered_json,
                     equipment_id,
-                    updated_ts
+                    event.alarm_severity,
+                    updated_ts,
+                    event.source_priority,
+                    urgency_score,
+                    urgency_band,
+                    urgency_reasons_json,
+                    triggered_rules_json,
+                    data_quality,
+                    time_to_limit_seconds,
+                    event.repeat_count,
+                    event.lifecycle_state,
+                    first_seen,
+                    last_seen,
+                    scoring_breakdown_json,
+                    ttl_unavailable_reason,
                 )
             )
+
+    def save_individual_alarm(self, incident_id: str, record) -> None:
+        """Persist an IndividualAlarmRecord into the individual_alarms table."""
+        from models import current_iso_utc
+        conn = self._get_connection()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO individual_alarms (
+                    alarm_id, incident_id, tag, equipment_id, alarm_type,
+                    value, threshold, source_priority, lifecycle_state, repeat_count,
+                    first_seen_timestamp, last_seen_timestamp, cleared_timestamp,
+                    acknowledged_timestamp, fingerprint, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(alarm_id) DO UPDATE SET
+                    repeat_count = excluded.repeat_count,
+                    lifecycle_state = excluded.lifecycle_state,
+                    last_seen_timestamp = excluded.last_seen_timestamp,
+                    cleared_timestamp = excluded.cleared_timestamp,
+                    acknowledged_timestamp = excluded.acknowledged_timestamp,
+                    value = excluded.value
+                """,
+                (
+                    record.alarm_id,
+                    incident_id,
+                    record.tag,
+                    record.equipment_id,
+                    record.alarm_type,
+                    str(record.value),
+                    record.threshold,
+                    record.source_priority,
+                    record.lifecycle_state,
+                    record.repeat_count,
+                    record.first_seen_timestamp,
+                    record.last_seen_timestamp,
+                    record.cleared_timestamp,
+                    record.acknowledged_timestamp,
+                    record.fingerprint,
+                    current_iso_utc(),
+                )
+            )
+
+    def get_individual_alarms(self, incident_id: str) -> List[dict]:
+        """Retrieve all individual alarm records for an incident."""
+        conn = self._get_connection()
+        cursor = conn.execute(
+            """SELECT alarm_id, incident_id, tag, equipment_id, alarm_type,
+                      value, threshold, source_priority, lifecycle_state, repeat_count,
+                      first_seen_timestamp, last_seen_timestamp, cleared_timestamp,
+                      acknowledged_timestamp, fingerprint, created_at
+               FROM individual_alarms WHERE incident_id = ?
+               ORDER BY first_seen_timestamp ASC""",
+            (incident_id,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
     def get_candidate_events(
         self,
@@ -394,7 +662,11 @@ class Database:
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         query = f"""
             SELECT event_id, primary_tag, primary_alarm, trigger_timestamp,
-                   raw_deviation_pct, clustered_tags, equipment_id
+                   raw_deviation_pct, clustered_tags, equipment_id, alarm_severity,
+                   source_priority, urgency_score, urgency_band, urgency_reasons,
+                   triggered_rules, data_quality, time_to_limit_seconds,
+                   repeat_count, lifecycle_state, first_seen_timestamp, last_seen_timestamp,
+                   scoring_breakdown, ttl_unavailable_reason
             FROM candidate_events
             {where_sql}
             ORDER BY trigger_timestamp ASC
@@ -403,6 +675,31 @@ class Database:
         results: List[CandidateEvent] = []
         for row in cursor.fetchall():
             clustered = json.loads(row["clustered_tags"])
+            # Reconstruct urgency assessment if columns present
+            urgency = None
+            try:
+                from models import UrgencyAssessment
+                row_keys = row.keys()
+                if row["urgency_band"] or row["urgency_score"] is not None:
+                    breakdown = {}
+                    if "scoring_breakdown" in row_keys and row["scoring_breakdown"]:
+                        try:
+                            breakdown = json.loads(row["scoring_breakdown"])
+                        except Exception:
+                            pass
+                    ttl_reason = row["ttl_unavailable_reason"] if "ttl_unavailable_reason" in row_keys else None
+                    urgency = UrgencyAssessment(
+                        source_priority=row["source_priority"],
+                        urgency_score=row["urgency_score"],
+                        urgency_band=row["urgency_band"] or "UNKNOWN",
+                        urgency_reasons=json.loads(row["urgency_reasons"]) if row["urgency_reasons"] else [],
+                        triggered_rules=json.loads(row["triggered_rules"]) if row["triggered_rules"] else [],
+                        data_quality=row["data_quality"] or "VALID",
+                        ttl_unavailable_reason=ttl_reason,
+                        scoring_breakdown=breakdown,
+                    )
+            except Exception:
+                pass
             results.append(
                 CandidateEvent(
                     event_id=row["event_id"],
@@ -410,7 +707,14 @@ class Database:
                     primary_alarm=bool(row["primary_alarm"]),
                     trigger_timestamp=row["trigger_timestamp"],
                     raw_deviation_pct=float(row["raw_deviation_pct"]),
-                    clustered_tags=clustered
+                    clustered_tags=clustered,
+                    alarm_severity=row["alarm_severity"],
+                    source_priority=row["source_priority"],
+                    urgency=urgency,
+                    repeat_count=row["repeat_count"] or 1,
+                    lifecycle_state=row["lifecycle_state"] or "ACTIVE",
+                    first_seen_timestamp=row["first_seen_timestamp"],
+                    last_seen_timestamp=row["last_seen_timestamp"],
                 )
             )
         return results
@@ -420,6 +724,19 @@ class Database:
         conn = self._get_connection()
         cur = conn.execute("SELECT COUNT(*) FROM candidate_events")
         return cur.fetchone()[0]
+
+    def get_recent_event_ids(self, limit: int = 10) -> List[str]:
+        """Return recent persisted event IDs ordered by source trigger time."""
+        conn = self._get_connection()
+        cursor = conn.execute(
+            """
+            SELECT event_id FROM candidate_events
+            ORDER BY trigger_timestamp DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 100)),)
+        )
+        return [row["event_id"] for row in cursor.fetchall()]
 
     def clear_candidate_events(self) -> None:
         """Wipe all candidate_events from SQLite database."""
@@ -999,6 +1316,76 @@ class Database:
         """
         cursor = conn.execute(query, (event_id,))
         return cursor.fetchone() is not None
+
+    def get_conversation_event_id(self, conversation_id: str) -> Optional[str]:
+        conn = self._get_connection()
+        row = conn.execute(
+            "SELECT event_id FROM assistant_messages WHERE conversation_id = ? LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+        return row["event_id"] if row else None
+
+    def get_assistant_messages(self, conversation_id: str, event_id: str, limit: int = 8) -> List[Dict[str, str]]:
+        conn = self._get_connection()
+        rows = conn.execute(
+            """
+            SELECT role, content, created_at FROM assistant_messages
+            WHERE conversation_id = ? AND event_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (conversation_id, event_id, max(1, min(int(limit), 40))),
+        ).fetchall()
+        messages = [{"role": row["role"], "content": row["content"], "created_at": row["created_at"]} for row in rows]
+        messages.reverse()
+        return messages
+
+    def save_assistant_message(self, conversation_id: str, event_id: str, role: str, content: str, created_at: Optional[str] = None) -> None:
+        conn = self._get_connection()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO assistant_messages (conversation_id, event_id, role, content, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (conversation_id, event_id, role, content[:4000], created_at or current_iso_utc()),
+            )
+
+    def get_similar_incidents(
+        self,
+        equipment_id: str,
+        primary_tag: Optional[str],
+        day_start: str,
+        before_timestamp: str,
+        exclude_event_id: Optional[str] = None,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_connection()
+        params: List[Any] = [equipment_id, day_start, before_timestamp]
+        clauses = ["equipment_id = ?", "trigger_timestamp >= ?", "trigger_timestamp <= ?"]
+        if primary_tag:
+            clauses.append("primary_tag = ?")
+            params.append(primary_tag)
+        if exclude_event_id:
+            clauses.append("event_id != ?")
+            params.append(exclude_event_id)
+        params.append(max(1, min(int(limit), 20)))
+        rows = conn.execute(
+            f"""
+            SELECT event_id, primary_tag, trigger_timestamp, alarm_severity
+            FROM candidate_events
+            WHERE {' AND '.join(clauses)}
+            ORDER BY trigger_timestamp DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [{
+            "event_id": row["event_id"],
+            "primary_tag": row["primary_tag"],
+            "timestamp": row["trigger_timestamp"],
+            "configured_severity": row["alarm_severity"],
+        } for row in rows]
 
     def close(self) -> None:
         """Close SQLite connection."""

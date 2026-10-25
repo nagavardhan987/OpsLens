@@ -1,18 +1,24 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Header from './components/Header';
 import ProcessValues from './components/ProcessValues';
-import AlarmPrioritization from './components/AlarmPrioritization';
 import EventStory from './components/EventStory';
 import EvidenceSection from './components/EvidenceSection';
 import RelevantSop from './components/RelevantSop';
 import NextBestAction from './components/NextBestAction';
 import ShiftHandoverCard from './components/ShiftHandoverCard';
+import AlarmHistory from './components/AlarmHistory';
+import IncidentOverview from './components/IncidentOverview';
+import AskOpsLensDrawer from './components/AskOpsLensDrawer';
 import SopModal from './components/SopModal';
+import AlarmPopup from './components/AlarmPopup';
+import ImpactMetricsPanel from './components/ImpactMetricsPanel';
 import HandoverModal from './components/HandoverModal';
+import { resolveEventEquipment } from './lib/equipmentPresentation';
 import {
   subscribeToEventStream,
   getFullEvent,
   getOpenEvents,
+  getRecentEvents,
   logOperatorAction,
   compileHandover,
 } from './api/client';
@@ -21,7 +27,8 @@ export default function App() {
   const [fullEvent, setFullEvent] = useState(null);
   const [currentEventId, setCurrentEventId] = useState(null);
   const [handover, setHandover] = useState(null);
-  const selectedScenario = 'valve_restriction';
+  const [recentEvents, setRecentEvents] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
 
   const [isIncident, setIsIncident] = useState(false);
   const [simulating, setSimulating] = useState(false);
@@ -31,6 +38,7 @@ export default function App() {
 
   const [isSopModalOpen, setIsSopModalOpen] = useState(false);
   const [isHandoverModalOpen, setIsHandoverModalOpen] = useState(false);
+  const [isAssistantOpen, setIsAssistantOpen] = useState(false);
 
   const timersRef = useRef([]);
   const currentEventIdRef = useRef(null);
@@ -42,6 +50,12 @@ export default function App() {
 
   const refreshHandover = useCallback(async () => {
     try { const h = await compileHandover(); setHandover(h); } catch (_) {}
+  }, []);
+
+  const refreshRecentEvents = useCallback(async () => {
+    try { setRecentEvents(await getRecentEvents(10)); }
+    catch (_) { /* Keep the last successfully loaded history visible. */ }
+    finally { setHistoryLoading(false); }
   }, []);
 
   const triggerCascade = useCallback((stepsCount = 5) => {
@@ -72,9 +86,10 @@ export default function App() {
         setIsIncident(true);
         triggerCascade(full.story?.steps?.length || 5);
         refreshHandover();
+        refreshRecentEvents();
       }
     } catch (_) {}
-  }, [triggerCascade, refreshHandover]);
+  }, [triggerCascade, refreshHandover, refreshRecentEvents]);
 
   // Poll the active-event endpoint as a recovery path if a browser connects
   // after an SSE notification or briefly loses its EventSource connection.
@@ -82,159 +97,133 @@ export default function App() {
     try {
       const open = await getOpenEvents();
       if (!open.length) {
-        if (currentEventIdRef.current) {
-          currentEventIdRef.current = null;
-          setCurrentEventId(null);
-          setFullEvent(null);
-          setIsIncident(false);
-          setSimStep(0);
-        }
+        setIsIncident((active) => active ? false : active);
         return;
       }
       const eventId = open[open.length - 1].event_id;
-      if (!eventId || eventId === currentEventIdRef.current) return;
+      if (!eventId) return;
       const full = await getFullEvent(eventId);
       if (full) {
-        currentEventIdRef.current = eventId;
-        setCurrentEventId(eventId);
         setFullEvent(full);
         setIsIncident(true);
-        triggerCascade(full.story?.steps?.length || 5);
-        refreshHandover();
+        if (eventId !== currentEventIdRef.current) {
+          currentEventIdRef.current = eventId;
+          setCurrentEventId(eventId);
+          triggerCascade(full.story?.steps?.length || 5);
+          refreshHandover();
+          refreshRecentEvents();
+        }
       }
-    } catch (_) {}
-  }, [triggerCascade, refreshHandover]);
+    } catch (_) { /* The data panels retain their last recorded state when unavailable. */ }
+  }, [triggerCascade, refreshHandover, refreshRecentEvents]);
+
+  const selectHistoryEvent = useCallback(async (eventId) => {
+    try {
+      const full = await getFullEvent(eventId);
+      if (!full) return;
+      currentEventIdRef.current = eventId;
+      setCurrentEventId(eventId);
+      setFullEvent(full);
+      setIsIncident(full.status !== 'RESOLVED');
+      setSimStep(full.story?.steps?.length || 0);
+      setSimulating(false);
+      setRecordedAction([...(full.actions || [])].reverse().find((action) => action.action_type === 'RESOLVE') || null);
+    } catch (error) { window.alert(error.message || 'Could not record operator action.'); }
+  }, []);
 
   useEffect(() => {
     // Subscribe synchronously before any API calls to avoid a startup race.
     const unsub = subscribeToEventStream(handleLiveEvent, () => {});
     refreshHandover();
+    refreshRecentEvents();
     refreshActiveIncident();
     const poll = setInterval(refreshActiveIncident, 2500);
-    return () => { clearAllTimers(); clearInterval(poll); unsub(); };
-  }, [handleLiveEvent, refreshActiveIncident, refreshHandover]);
+    const historyPoll = setInterval(refreshRecentEvents, 10000);
+    return () => { clearAllTimers(); clearInterval(poll); clearInterval(historyPoll); unsub(); };
+  }, [handleLiveEvent, refreshActiveIncident, refreshHandover, refreshRecentEvents]);
 
   const handleOperatorAction = async (actionType, notes) => {
     if (!currentEventId) return;
+    if (actionType === 'RESOLVE' && !window.confirm('Have you checked the EcoStruxure/runtime and confirmed that this alarm is clear? This records your confirmation only; OpsLens will not write to the PLC or control equipment.')) return;
     try {
-      const res = await logOperatorAction({ eventId: currentEventId, operator: 'J. Rivera (Shift 2)', actionType, notes: notes || `Operator executed ${actionType}` });
+      const safeNotes = actionType === 'RESOLVE'
+        ? `Operator attests runtime alarm is clear. ${notes || ''}`.trim()
+        : notes || `Operator recorded ${actionType}`;
+      const res = await logOperatorAction({ eventId: currentEventId, operator: 'J. Rivera (Shift 2)', actionType, notes: safeNotes });
       setRecordedAction(res);
       await refreshHandover();
-      if (actionType === 'RESOLVE') setTimeout(() => setIsHandoverModalOpen(true), 400);
+      await refreshRecentEvents();
+      if (actionType === 'RESOLVE') {
+        const updated = await getFullEvent(currentEventId);
+        if (updated) setFullEvent(updated);
+        setIsIncident(false);
+        setTimeout(() => setIsHandoverModalOpen(true), 400);
+      }
     } catch (_) {}
   };
 
-  const getEquipmentId = () => {
-    if (selectedScenario === 'bearing_wear' || selectedScenario === 'compressor_overspeed') return 'Compressor-01';
-    if (selectedScenario === 'sensor_fault') return 'Filter-01';
-    if (selectedScenario === 'tank_overflow') return 'Tank-01';
-    const pt = fullEvent?.candidate?.primary_tag || '';
-    if (pt.includes('CMP')) return 'Compressor-01';
-    if (pt.includes('TNK')) return 'Tank-01';
-    if (pt.includes('FLT')) return 'Filter-01';
-    return 'Pump-02';
-  };
-
-  const equipmentId  = getEquipmentId();
-  const primaryTag   = fullEvent?.candidate?.primary_tag || (selectedScenario === 'bearing_wear' ? 'CMP-01-VIB' : 'VLV-04-POS');
-  const causalLabel  = fullEvent?.story?.causal_label || null;
+  const equipmentId  = resolveEventEquipment(fullEvent);
+  const hasEvent = Boolean(fullEvent);
+  const primaryTag   = fullEvent?.candidate?.primary_tag || fullEvent?.primary_tag || fullEvent?.story?.steps?.find((step) => !String(step.tag || '').startsWith('ALM-'))?.tag || '';
   const stepsLen     = fullEvent?.story?.steps?.length || 1;
-  const panelsVisible = pacingMode === 'instant' || !simulating || simStep >= stepsLen;
+  const panelsVisible = true;
 
   return (
-    <div className="min-h-screen bg-[#070B11] text-slate-100 flex flex-col font-sans">
+    <div className="hmi-app min-h-screen flex flex-col font-sans">
+      <Header onAskOpsLens={() => setIsAssistantOpen(true)} />
 
-      {/* Sticky Header */}
-      <Header
-        machineStatus={{ status: isIncident ? 'CRITICAL_ALARM' : 'NOMINAL', primary_alarm: isIncident && Boolean(fullEvent?.candidate?.primary_alarm) }}
-        isIncident={isIncident}
-        operatorName="J. Rivera (Shift 2)"
-        equipmentId={equipmentId}
-        primaryTag={primaryTag}
-        causalLabel={causalLabel}
-        fullEvent={fullEvent}
-      />
+      <main id="overview" className="hmi-main mx-auto flex w-full max-w-[1600px] flex-1 flex-col gap-5 px-4 py-5 md:px-7 md:py-7">
+        {hasEvent
+          ? <IncidentOverview event={fullEvent} equipment={equipmentId} isActive={isIncident} onOpenSop={() => setIsSopModalOpen(true)} onAskOpsLens={() => setIsAssistantOpen(true)} />
+          : <section className="incident-panel history"><h1 className="text-xl font-semibold text-white">No incident selected</h1><p className="mt-2 text-sm leading-6 text-slate-400">Open Scenario Lab to run a synthetic event, or select a recorded incident from alarm history.</p></section>}
 
-      {/* Dashboard body — optimised for 1920×1080 */}
-      <main className="flex-1 px-6 py-5 space-y-4">
+        {hasEvent && <ProcessValues event={fullEvent} equipmentId={equipmentId} />}
 
-        {/* Row 1: Alarm banner */}
-        <AlarmPrioritization
-          isIncident={isIncident}
-          revealedStep={simStep}
-          candidate={fullEvent?.candidate}
-          correlated={fullEvent?.correlated}
-          story={fullEvent?.story}
-          guidance={fullEvent?.guidance}
-        />
-
-        {/* Row 2: Sensor tiles */}
-        <ProcessValues
-          revealedStep={simStep}
-          isIncident={isIncident}
-          storySteps={fullEvent?.story?.steps || []}
-          equipmentId={equipmentId}
-          primaryTag={primaryTag}
-        />
-
-        {/* Row 3: Event story (full width) */}
-        <EventStory
-          story={fullEvent?.story}
-          isIncident={isIncident}
-          revealedCount={Math.min(simStep, stepsLen)}
-        />
-
-        {/* Row 4: Three-column — Evidence | SOP | Handover */}
-        <div className="grid grid-cols-12 gap-4">
-          {/* Evidence — 5 cols */}
-          <div className="col-span-5">
-            <EvidenceSection
-              evidence={fullEvent?.evidence}
-              isIncident={isIncident}
-              isVisible={panelsVisible}
-            />
+        {hasEvent && <details className="dashboard-details" open>
+          <summary><span>Incident timeline</span><span className="details-hint">{fullEvent?.story?.causal_label || 'Event sequence'}</span></summary>
+          <div className="border-t border-slate-800 p-4">
+            <EventStory story={fullEvent?.story} isIncident={hasEvent} revealedCount={Math.min(simStep, stepsLen)} />
           </div>
+        </details>}
 
-          {/* SOP — 3 cols */}
-          <div className="col-span-3">
-            <RelevantSop
-              sopData={fullEvent?.sop_match}
-              onOpenSopModal={() => setIsSopModalOpen(true)}
-              isIncident={isIncident}
-              isVisible={panelsVisible}
-            />
+        {hasEvent && <details className="dashboard-details">
+          <summary><span>Evidence and analysis</span><span className="details-hint">Contributor ranking · supporting records</span></summary>
+          <div className="border-t border-slate-800 p-4">
+            <EvidenceSection evidence={fullEvent?.evidence} evidenceAudit={fullEvent?.evidence_audit} isIncident={hasEvent} isVisible={panelsVisible} />
           </div>
+        </details>}
 
-          {/* Handover — 4 cols */}
-          <div className="col-span-4">
-            <ShiftHandoverCard
-              handover={handover}
-              unitName={equipmentId}
-              onOpenModal={() => setIsHandoverModalOpen(true)}
-              isIncident={isIncident}
-              fullEvent={fullEvent}
-            />
+        {hasEvent && <details className="dashboard-details">
+          <summary><span>Procedure and operator record</span><span className="details-hint">SOP · next-best actions · shift handover</span></summary>
+          <div className="border-t border-slate-800 p-4 space-y-3">
+            {/* SOP match — compact single row above actions */}
+            <RelevantSop sopData={fullEvent?.sop_match} onOpenSopModal={() => setIsSopModalOpen(true)} isIncident={hasEvent} isVisible={panelsVisible} />
+            {/* 2-column: actions (wider) + handover (sidebar) */}
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_280px]">
+              <NextBestAction guidance={fullEvent?.guidance} actions={fullEvent?.guidance?.next_best_actions || []} equipmentId={equipmentId} primaryTag={fullEvent?.evidence?.likely_contributor_tag || primaryTag} recordedAction={recordedAction} onExecuteAction={handleOperatorAction} onOpenSopModal={() => setIsSopModalOpen(true)} isIncident={hasEvent} isVisible={panelsVisible} isResolved={!isIncident} alarmClearObserved={fullEvent?.runtime_alarm_state?.observed && fullEvent?.runtime_alarm_state?.active === false} />
+              <ShiftHandoverCard handover={handover} unitName={equipmentId} onOpenModal={() => setIsHandoverModalOpen(true)} isIncident={hasEvent} fullEvent={fullEvent} />
+            </div>
           </div>
-        </div>
+        </details>}
 
-        {/* Row 5: Next-best actions (full width) */}
-        <NextBestAction
-          guidance={fullEvent?.guidance}
-          actions={fullEvent?.guidance?.next_best_actions || []}
-          equipmentId={equipmentId}
-          primaryTag={fullEvent?.evidence?.likely_contributor_tag || primaryTag}
-          recordedAction={recordedAction}
-          onExecuteAction={handleOperatorAction}
-          onOpenSopModal={() => setIsSopModalOpen(true)}
-          isIncident={isIncident}
-          isVisible={panelsVisible}
-        />
+        <ImpactMetricsPanel />
 
+        <details className="dashboard-details">
+          <summary><span>Alarm history</span><span className="details-hint">{historyLoading ? 'Loading records…' : `${recentEvents.length} recorded events`}</span></summary>
+          <div className="border-t border-slate-800 p-4"><AlarmHistory events={recentEvents} loading={historyLoading} onSelectEvent={selectHistoryEvent} /></div>
+        </details>
       </main>
 
       {/* Modals */}
       <SopModal isOpen={isSopModalOpen} onClose={() => setIsSopModalOpen(false)} sopData={fullEvent?.sop_match} />
       <HandoverModal isOpen={isHandoverModalOpen} onClose={() => setIsHandoverModalOpen(false)} handover={handover} unitName={equipmentId} isIncident={isIncident} />
+      <AskOpsLensDrawer event={fullEvent} equipment={equipmentId} isOpen={isAssistantOpen} onClose={() => setIsAssistantOpen(false)} />
+      <AlarmPopup 
+        event={fullEvent} 
+        isActive={isIncident} 
+        onOpenCopilot={() => setIsAssistantOpen(true)}
+        onDismiss={() => {}}
+      />
     </div>
   );
 }

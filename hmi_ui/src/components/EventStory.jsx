@@ -1,110 +1,153 @@
 import React from 'react';
-import { ChevronRight, Sparkles, Clock } from 'lucide-react';
+import { Clock, Sparkles, ChevronDown } from 'lucide-react';
+
+function parseEventTimestamp(timestamp) {
+  if (typeof timestamp !== 'string' || timestamp.trim() === '') return null;
+  const ms = Date.parse(timestamp);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** Short relative time for the main timeline row */
+function formatRelativeTime(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** Full timestamp for engineering details */
+function formatFullTimestamp(timestamp) {
+  const ms = parseEventTimestamp(timestamp);
+  if (ms === null) return 'Timestamp unavailable';
+  return new Intl.DateTimeFormat(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+  }).format(ms);
+}
 
 export default function EventStory({ story = null, isIncident = false, revealedCount = 5 }) {
   const steps = story?.steps || [];
 
   if (!isIncident || steps.length === 0) {
     return (
-      <div className="rounded-xl border border-[#1a2535] bg-[#0d1420] p-5 flex flex-col items-center justify-center min-h-[120px]">
-        <Clock className="w-5 h-5 text-slate-600 mb-2" />
-        <p className="text-xs text-slate-500">Awaiting incident — timeline will appear here</p>
+      <div className="flex min-h-[80px] items-center justify-center gap-2 rounded-lg border border-[#1a2535] bg-[#0d1420] p-4 text-xs text-slate-500">
+        <Clock className="h-4 w-4 shrink-0 text-slate-600" />
+        Awaiting incident — timeline will appear here
       </div>
     );
   }
 
-  let leadTimeSec = null;
-  if (steps.length > 1) {
-    try {
-      const t0 = new Date(steps[0].timestamp).getTime();
-      const tEnd = new Date(steps[steps.length - 1].timestamp).getTime();
-      const diff = Math.round((tEnd - t0) / 1000);
-      if (diff > 0) leadTimeSec = diff;
-    } catch (_) {}
-  }
-
-  const causalLabel = story?.causal_label || 'Causal Sequence';
+  const timestamps = steps.map((s) => parseEventTimestamp(s.timestamp));
+  const validTs = timestamps.filter((t) => t !== null);
+  const causalLabel = story?.causal_label || 'Recorded incident sequence';
+  const totalDuration = validTs.length > 1
+    ? formatRelativeTime(Math.max(...validTs) - Math.min(...validTs))
+    : null;
 
   return (
-    <div className="rounded-xl border border-[#00A344]/30 bg-[#0d1420] p-5 relative overflow-hidden">
-      {/* Subtle glow */}
-      <div className="absolute -top-12 -right-12 w-40 h-40 bg-[#00A344]/5 rounded-full blur-3xl pointer-events-none" />
-
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-[#00A344]/15 border border-[#00A344]/40 flex items-center justify-center">
-            <Sparkles className="w-3.5 h-3.5 text-[#00D65A]" />
+    <div className="rounded-lg border border-[#1a2535] bg-[#0d1420] overflow-hidden">
+      {/* Compact header */}
+      <div className="flex items-center justify-between border-b border-[#1a2535] px-4 py-2.5">
+        <div className="flex items-center gap-2">
+          <div className="flex h-5 w-5 items-center justify-center rounded bg-[#00A344]/15 border border-[#00A344]/30">
+            <Sparkles className="h-3 w-3 text-[#00D65A]" />
           </div>
-          <div>
-            <div className="text-[10px] font-mono uppercase tracking-widest text-[#00D65A]">Causal Chain</div>
-            <div className="text-sm font-bold text-white leading-tight">{causalLabel}</div>
-          </div>
+          <span className="text-xs font-semibold text-slate-200">{causalLabel}</span>
         </div>
-        {leadTimeSec && (
-          <span className="text-[11px] font-mono text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded">
-            {leadTimeSec}s lead time
+        {totalDuration && (
+          <span className="text-[10px] font-mono text-amber-400/80 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded whitespace-nowrap">
+            {totalDuration} total
           </span>
         )}
       </div>
 
-      {/* Steps */}
-      <div className={`grid gap-3`} style={{ gridTemplateColumns: `repeat(${steps.length}, 1fr)` }}>
+      {/* Timeline as readable vertical list */}
+      <ol className="divide-y divide-[#1a2535]">
         {steps.map((step, idx) => {
           const isRevealed = idx < revealedCount;
-          const isAlarm = step.tag.startsWith('ALM-');
+          const isAlarm = String(step.tag || '').startsWith('ALM-');
           const isActive = idx === revealedCount - 1;
-          let deltaPct = 0;
-          if (step.value_before && step.value_before !== 0 && step.value_after !== null)
-            deltaPct = ((step.value_after - step.value_before) / step.value_before) * 100;
+          const eventTime = timestamps[idx];
+          const prevTime = idx > 0 ? timestamps[idx - 1] : null;
+          const elapsed = idx === 0
+            ? 'Start'
+            : eventTime !== null && prevTime !== null
+              ? `+${formatRelativeTime(eventTime - prevTime)}`
+              : '—';
+
+          const hasDeviation = !isAlarm
+            && Number.isFinite(step.value_before)
+            && Number.isFinite(step.value_after)
+            && step.value_before !== 0;
+          const deltaPct = hasDeviation
+            ? ((step.value_after - step.value_before) / step.value_before) * 100
+            : null;
 
           return (
-            <div key={idx} className="relative">
-              {/* Connector arrow */}
-              {idx < steps.length - 1 && isRevealed && (
-                <ChevronRight className="absolute -right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-600 z-10" />
-              )}
-              <div className={`rounded-lg p-3 border h-full flex flex-col gap-2 transition-all duration-500 ${
-                !isRevealed
-                  ? 'opacity-20 border-[#1a2535] bg-[#0a0e16]'
-                  : isAlarm
-                  ? 'border-red-500/60 bg-[#150e10] ring-1 ring-red-500/30'
-                  : isActive
-                  ? 'border-[#00A344]/60 bg-[#0d1a12] ring-1 ring-[#00A344]/20'
-                  : 'border-[#1a2535] bg-[#0d1420]'
-              }`}>
-                {/* Step badge + tag */}
-                <div className="flex items-center justify-between">
-                  <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded uppercase ${
-                    !isRevealed ? 'bg-slate-800 text-slate-600'
-                    : isAlarm ? 'bg-red-600/80 text-white'
-                    : 'bg-[#00A344]/20 text-[#00D65A]'
-                  }`}>
-                    S{step.step_number || idx + 1}
-                  </span>
-                  <span className={`text-[10px] font-mono font-bold ${isAlarm ? 'text-red-400' : 'text-amber-400'}`}>
+            <li
+              key={idx}
+              className={`grid items-start gap-x-3 px-4 py-2.5 transition-opacity
+                grid-cols-[28px_minmax(0,1fr)_56px]
+                ${!isRevealed ? 'opacity-25' : ''}
+                ${isAlarm ? 'bg-red-950/20' : isActive ? 'bg-[#0a1810]' : ''}
+              `}
+            >
+              {/* Step badge */}
+              <div className="flex flex-col items-center gap-1 pt-0.5">
+                <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-black
+                  ${!isRevealed ? 'bg-slate-800 text-slate-600'
+                    : isAlarm ? 'bg-red-600 text-white'
+                    : isActive ? 'bg-[#00A344] text-black'
+                    : 'bg-[#1a2535] text-slate-400'}`}>
+                  {step.step_number || idx + 1}
+                </span>
+                {idx < steps.length - 1 && (
+                  <div className={`w-px h-3 ${isRevealed ? 'bg-[#2a3848]' : 'bg-[#1a2535]'}`} />
+                )}
+              </div>
+
+              {/* Main content */}
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                  <span className={`font-mono text-[10px] font-bold whitespace-nowrap
+                    ${isAlarm ? 'text-red-400' : 'text-amber-400'}`}>
                     {step.tag}
                   </span>
+                  <span className="text-xs text-slate-300 leading-snug">
+                    {step.description || 'Event description unavailable'}
+                  </span>
                 </div>
 
-                {/* Description */}
-                <p className="text-[11px] text-slate-400 leading-snug flex-1">
-                  {step.description?.split(' ').slice(0, 10).join(' ')}{step.description?.split(' ').length > 10 ? '…' : ''}
-                </p>
-
-                {/* Value */}
-                <div className={`text-[10px] font-mono text-center rounded py-1 ${
-                  !isRevealed ? 'bg-[#0a0e16] text-slate-700'
-                  : isAlarm ? 'bg-red-950/50 text-red-300'
-                  : 'bg-[#0a0e16] text-amber-300'
-                }`}>
-                  {isAlarm ? 'TRIP ACTIVE' : `${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(1)}%`}
-                </div>
+                {/* Engineering details — collapsed by default */}
+                <details className="mt-1 group">
+                  <summary className="cursor-pointer text-[9px] text-slate-600 hover:text-slate-400 list-none select-none flex items-center gap-1">
+                    <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
+                    Engineering detail
+                  </summary>
+                  <div className="mt-1 space-y-0.5 text-[9px] font-mono text-slate-500">
+                    <div>Time: {formatFullTimestamp(step.timestamp)}</div>
+                    {deltaPct !== null && (
+                      <div>
+                        Δ {deltaPct >= 0 ? '+' : ''}{deltaPct.toFixed(1)}%
+                        {' '}({step.value_before} → {step.value_after})
+                        <span className="ml-1 text-slate-600">percentage-point change relative to prior reading</span>
+                      </div>
+                    )}
+                    {isAlarm && <div className="text-red-400">TRIP ACTIVE</div>}
+                  </div>
+                </details>
               </div>
-            </div>
+
+              {/* Elapsed time badge */}
+              <div className="text-right">
+                <span className="text-[9px] font-mono text-slate-500 whitespace-nowrap">{elapsed}</span>
+              </div>
+            </li>
           );
         })}
-      </div>
+      </ol>
     </div>
   );
 }

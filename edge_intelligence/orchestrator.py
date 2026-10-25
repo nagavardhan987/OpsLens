@@ -35,8 +35,31 @@ from shift_handover import ShiftHandoverCompiler
 from time_series import TimeSeriesProcessor
 from knowledge_graph import IndustrialKnowledgeGraph
 from alarm_synthesis import AlarmSynthesisEngine
+from alarm_priority import AlarmPriorityInterpreter
 
 logger = logging.getLogger("opslens.orchestrator")
+
+
+def _evaluate_candidate_urgency(candidate, db):
+    """Evaluate and attach urgency assessment to a CandidateEvent. Non-blocking."""
+    try:
+        from alarm_urgency import evaluate_urgency
+        # Fetch recent readings for the primary tag
+        primary_readings = db.get_readings(tag=candidate.primary_tag, limit=30, order_desc=True)
+        primary_readings.reverse()  # oldest first
+        # Get correlated deviations if available
+        correlated_events = db.get_correlated_events(event_id=candidate.event_id)
+        corr_devs = []
+        if correlated_events:
+            corr_devs = [d.model_dump() if hasattr(d, "model_dump") else dict(d)
+                         for d in correlated_events[0].correlated_deviations]
+        urgency = evaluate_urgency(candidate, primary_readings, correlated_deviations=corr_devs)
+        candidate.urgency = urgency
+        candidate.source_priority = urgency.source_priority
+        return urgency
+    except Exception as exc:
+        logger.debug(f"[Orchestrator] Urgency evaluation skipped for {candidate.event_id}: {exc}")
+        return None
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -180,6 +203,13 @@ class OpsLensOrchestrator:
                 if event_id not in self._completed_events or has_new_tags or primary_changed:
                     task = asyncio.create_task(self.process_candidate_event(candidate))
                     self._in_flight_tasks[event_id] = task
+                else:
+                    # Update urgency with the new repeat_count / persistence and broadcast
+                    _evaluate_candidate_urgency(candidate, self.db)
+                    self.db.save_candidate_event(candidate, equipment_id=self._equipment_for(candidate.primary_tag))
+                    full_event = self.get_full_event(event_id)
+                    if full_event:
+                        await self._broadcast(full_event)
             else:
                 # Worker in flight; record pending update so it re-runs when current finish
                 if has_new_tags or primary_changed:
@@ -216,6 +246,10 @@ class OpsLensOrchestrator:
             # Stage 6: Evidence & Attribution (writes to evidence)
             evidence = self.evidence_engine.evaluate_event(
                 correlated, persist=True, temporal_context=temporal_context, graph_context=graph_context)
+
+            # Phase 2: Urgency evaluation (after evidence so correlated deviations are ready)
+            _evaluate_candidate_urgency(candidate, self.db)
+            self.db.save_candidate_event(candidate, equipment_id=equipment)
 
             telemetry = temporal_context["telemetry"]
             temporal_observations = temporal_context["observations"]
@@ -263,10 +297,17 @@ class OpsLensOrchestrator:
 
     @staticmethod
     def _equipment_for(tag: str) -> str:
-        if any(token in tag for token in ("P02", "FLW", "VLV", "PIT", "MOT")): return "Pump-02"
-        if "CMP" in tag: return "Compressor-01"
-        if "TNK" in tag: return "Tank-01"
-        if "FLT" in tag: return "Filter-01"
+        try:
+            from tag_registry import TAG_REGISTRY
+            entry = TAG_REGISTRY.get(tag)
+            if entry and entry.equipment_id:
+                return entry.equipment_id
+        except Exception:
+            pass
+        if any(token in tag for token in ("P02", "FLW", "VLV", "PIT", "MOT", "P01")): return "Pump-02"
+        if any(token in tag for token in ("CMP", "C01")): return "Compressor-01"
+        if any(token in tag for token in ("TNK", "T01")): return "Tank-01"
+        if any(token in tag for token in ("FLT", "F01")): return "Filter-01"
         return "Unknown equipment"
 
     # -------------------------------------------------------------------------
@@ -286,6 +327,7 @@ class OpsLensOrchestrator:
         sop_matches = self.db.get_sop_matches(event_id=event_id)
         guidance = self.db.get_guidance(event_id=event_id)
         actions = self.db.get_operator_actions(event_id=event_id)
+        evidence_audit = self.db.get_evidence_audit(event_id)
 
         # If event does not exist in any stage, return None
         if not any([candidates, correlated, stories, evidence, sop_matches, guidance]):
@@ -303,16 +345,54 @@ class OpsLensOrchestrator:
         sop_obj = sop_matches[0] if sop_matches else None
         guidance_obj = guidance[0] if guidance else None
 
+        # Old persisted matches may predate equipment-aware retrieval. Never
+        # expose a procedure or its derived actions when its recorded equipment
+        # conflicts with the event's primary tag.
+        if candidate_obj and sop_obj:
+            incident_equipment = self._equipment_for(candidate_obj.primary_tag)
+            matched_equipment = str((sop_obj.why_retrieved or {}).get("equipment") or "").strip()
+            if (matched_equipment and incident_equipment != "Unknown equipment"
+                    and matched_equipment.casefold() != incident_equipment.casefold()):
+                logger.warning(
+                    "[Orchestrator] Hiding stale SOP match for event %s: %s does not match %s",
+                    event_id, matched_equipment, incident_equipment,
+                )
+                stale_sop_id = sop_obj.sop_id
+                sop_obj = None
+                if guidance_obj and guidance_obj.cited_sop_id == stale_sop_id:
+                    guidance_obj = None
+
+        priority_interpretation = AlarmPriorityInterpreter.interpret(
+            candidate_obj.alarm_severity if candidate_obj else None,
+            related_signal_count=len(correlated_obj.correlated_deviations) if correlated_obj else 0,
+        )
+
+        # Phase 2: Urgency, lifecycle, and individual alarms
+        urgency_data = None
+        if candidate_obj and candidate_obj.urgency:
+            urgency_data = candidate_obj.urgency.model_dump()
+        individual_alarms = []
+        try:
+            individual_alarms = self.db.get_individual_alarms(event_id)
+        except Exception:
+            pass
+
         return {
             "event_id": event_id,
             "primary_tag": candidate_obj.primary_tag if candidate_obj else (story_obj.steps[0].tag if story_obj and story_obj.steps else "UNKNOWN"),
             "trigger_timestamp": candidate_obj.trigger_timestamp if candidate_obj else (story_obj.steps[0].timestamp if story_obj and story_obj.steps else None),
             "status": status,
             "is_open": not is_resolved,
+            "priority_interpretation": priority_interpretation,
+            "urgency": urgency_data,
+            "repeat_count": candidate_obj.repeat_count if candidate_obj else 1,
+            "lifecycle_state": candidate_obj.lifecycle_state if candidate_obj else "ACTIVE",
+            "individual_alarms": individual_alarms,
             "candidate": candidate_obj.model_dump() if candidate_obj else None,
             "correlated": correlated_obj.model_dump() if correlated_obj else None,
             "story": story_obj.model_dump() if story_obj else None,
             "evidence": evidence_obj.model_dump() if evidence_obj else None,
+            "evidence_audit": evidence_audit,
             "sop_match": sop_obj.model_dump() if sop_obj else None,
             "guidance": guidance_obj.model_dump() if guidance_obj else None,
             "actions": [a.model_dump() for a in actions]

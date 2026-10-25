@@ -48,6 +48,7 @@ def chunk_sop(sop: Dict[str, Any]) -> List[Dict[str, Any]]:
         "revision": sop.get("revision", "1.0"),
         "effective_date": sop.get("effective_date", ""),
         "source": "OpsLens SOP Knowledge Base",
+        "document_status": sop.get("document_status", "SOURCE DOCUMENT — approval status not verified"),
         "keywords": keywords,
         "reference_limits": ref_limits,
         "tags": sop.get("tags", []),

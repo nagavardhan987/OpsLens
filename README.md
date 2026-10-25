@@ -27,13 +27,24 @@ OpsLens is an **edge-deployable AI copilot for industrial operators** (HMI/SCADA
 └──────────────────────────────────────────┘
 ```
 
+### Copilot layer (Schneider runtime feedback)
+
+1. **HMI Runtime** — alarm popover stays in the header; Ask OpsLens opens a side rail that does not dim or block the mimic.
+2. **Copilot service** — Context Builder (30-minute window), optional LLM rephrasing, SSE token display after validation, conversation memory bound to one incident.
+3. **Data + intelligence** — SQLite time-series and audit logs, event correlation, evidence ranking, SOP RAG (Qdrant + BM25 fallback).
+
+The copilot is **advisory and read-only**. It does not acknowledge alarms, change setpoints, or write to a PLC. Simulated telemetry is labeled synthetic. A live EcoStruxure Operator Terminal Expert connection is **not claimed** until Schneider confirms the runtime integration method.
+
 ### LLM Fallback Chain (offline-first)
 ```
-1. Local SOP + deterministic inference
-2. Cloud LLM (Gemini/GPT) — online only
-3. Ollama SLM (Mistral 7B) — offline
-4. Deterministic template — always works
+1. Record-grounded deterministic assistant (always available)
+2. Optional configured LLM/SLM rephrases only grounded facts
+3. Cloud LLM (Groq / Gemini / OpenAI / Anthropic) — only if keys are set
+4. Ollama / in-process SLM — local option
+5. SOP-first guidance engine, then deterministic template
 ```
+
+Set `OPSLENS_LLM_PROVIDER` and the matching key in the environment. For Groq, set `OPSLENS_LLM_PROVIDER=groq` and `GROQ_API_KEY`; the default model is `openai/gpt-oss-20b`, and `OPSLENS_LLM_MODEL` and `GROQ_API_ENDPOINT` can override the model and endpoint. Do not put keys in source or commit local environment files. If the provider is unset, times out, or returns ungrounded JSON, the operator sees a clear deterministic-fallback status. Provider health reports verified only after a successful inference in the current backend process.
 
 ---
 
@@ -116,6 +127,13 @@ python server.py
 # FastAPI running at http://localhost:8000
 ```
 
+`server.py` reads optional `OPSLENS_HOST` and `OPSLENS_PORT` environment
+variables. If the Vite frontends use `VITE_API_BASE_URL=http://127.0.0.1:8001/api`,
+set `OPSLENS_PORT=8001` before starting the backend so both frontends and the API
+use the same port. On startup it also loads `edge_intelligence/.env` before
+importing backend services; variables already present in the process environment
+take precedence. Keep `.env` local and untracked; the repository ignores it.
+
 ### Frontend
 
 ```bash
@@ -163,7 +181,7 @@ python -m unittest discover tests -v
 | Backend | Python 3.11, FastAPI, SQLite, asyncio |
 | ML/RAG | sentence-transformers (all-MiniLM-L6-v2), Qdrant, optional BM25 fallback |
 | Frontend | React 18, Vite, Tailwind CSS, Lucide Icons |
-| LLM | Gemini API / Ollama (offline SLM) / deterministic fallback |
+| LLM | Optional Groq / Gemini / OpenAI / Anthropic API, Ollama (offline SLM), or deterministic fallback |
 | Deployment | Edge PC, local Qdrant + SQLite, no cloud required |
 
 ## Local Qdrant RAG and edge deployment
@@ -197,6 +215,22 @@ python ingest_sops.py
 ```
 
 Ingestion reads each JSON file in `edge_intelligence/sop_documents/`, creates an overview chunk and procedure chunks, embeds them locally, and upserts deterministic point IDs into Qdrant. Repeat `python ingest_sops.py` after adding or changing SOP files. The existing `VectorStore` abstraction allows replacing the Qdrant implementation without changing ingestion or RAG orchestration.
+
+### Read-only EcoStruxure / OPC UA connection
+
+The OPC UA adapter is a read-only client. It does not write nodes or operate equipment. It only accepts telemetry with a source/server timestamp; a sample without a timestamp is skipped instead of being assigned a fabricated time. Configure `OPCUA_ENDPOINT` and `OPCUA_TAG_MAPPING` using the endpoint and NodeIds from the EOTE/OPC UA server. The tag map is JSON from OpsLens tag names to actual server NodeIds, for example:
+
+```json
+{
+  "VLV-04-POS": "ns=2;s=Pump02.ValvePosition",
+  "FIT-02-FLW": "ns=2;s=Pump02.FlowRate",
+  "ALM-P02-HP": "ns=2;s=Pump02.HighPressureAlarm"
+}
+```
+
+Optional source severity can be mapped with `OPCUA_ALARM_SEVERITY_MAPPING` pointing to a second JSON file whose keys are OpsLens alarm tags and whose values are actual severity NodeIds. REST/MQTT inputs may instead include `alarm_severity`/`severity` in their payload. OpsLens displays that source value as-is; it does not derive an alarm priority from its evidence ranking. The example NodeIds above are placeholders until replaced with the NodeIds exported by your EOTE project. Check `/api/integration/status` for adapter configuration. A server endpoint, readable nodes, OPC UA security settings, and tag mapping must be supplied before a live EOTE connection can be claimed.
+
+Operator resolution is an audit attestation only: OpsLens asks the operator to confirm the runtime alarm is clear, logs that confirmation, and closes the dashboard incident. It does not verify the alarm condition through OPC UA and does not clear or control equipment.
 
 ### Run the complete local system
 
@@ -259,8 +293,36 @@ OpsLens returns each hit's actual Qdrant cosine score as `similarity` and the be
 
 Industrial adapters remain read-only. Qdrant, RAG, and the language model provide advisory content only; there is no path from retrieval or generation to PLC, pump, valve, actuator, or setpoint writes.
 
+### Demonstration incident and recovery workflow
+
+Use the Engineering Console at `http://localhost:5174` to start the Pump-02 valve-restriction scenario. It generates synthetic, timestamped tag readings which flow through time-series observations, alarm/event correlation, evidence scoring, SOP retrieval, and the operator HMI at `http://localhost:5173`. After the scenario completes, the console offers **Run simulated corrective action**. That action only generates a synthetic recovery trajectory toward the configured tag-range midpoints. The event remains open until the backend observes `ALM-P02-HP=false` at a timestamp later than the alarm and the operator confirms the clear state in the HMI. No PLC or EOTE runtime command is sent.
+
+The bundled `SOP-P02-VLV-01` is a fictional demonstration example and is explicitly not an approved operating instruction. Uploaded source documents carry their document status; OpsLens cannot establish whether a plant has approved them. When no suitable Qdrant result or positive BM25 match exists, the guidance path returns **Operator verification required**. BM25's keyword score is not shown as a semantic similarity.
+
+Alarm priority is passed through from a configured source when supplied. OpsLens adds related-signal context but does not rank above or override that source priority. Synthetic alarm severity is shown as “not supplied.” The Evidence Engine percentage is the leading contributor's raw formula score divided by the sum of candidate scores; it is a ranking heuristic, not root-cause probability or alarm severity. Its audit shows deviations, registry weights, topology distance, timing precedence, and the observed reading, configured range, and timestamp where available.
+
+The time-series processor is a bounded in-memory per-tag history for baseline deviation, trend, rate of change, configured threshold, and a simple change-point flag. It is a prototype contextualizer, not a validated production process analytics package. The project has both a tag-causality DAG used by the correlator and a small static NetworkX relationship graph used for context; neither is a live plant knowledge graph. EOTE/PLC compatibility and live connection behavior must be validated against the actual runtime and an approved read-only adapter configuration.
+
 ---
 
 ## License
 
 MIT
+## Operator dashboard and Ask OpsLens
+
+The operator home view keeps the selected alarm summary, source timestamp,
+configured priority and current state visible. Telemetry/evidence, event timeline,
+procedure/operator actions and alarm history are collapsed until opened.
+
+The **Ask OpsLens** drawer is incident-scoped and read-only. The UI sends only
+the selected `event_id` and question to `POST /api/assistant/ask`; FastAPI loads
+the stored event, evidence audit, actual event-story timestamps and retrieved
+Qdrant chunks. The current response builder is deterministic and record-grounded
+(it does not call a cloud LLM or require an API key). It returns supporting
+readings/events, SOP source passages with document and section, an uncertainty
+status, and the evidence-score interpretation. A procedure is considered
+approved only when the source explicitly marks it approved; otherwise the answer
+asks the operator to consult an approved site procedure.
+
+This remains a synthetic demonstration. It does not confirm EOTE connectivity or
+send commands to a PLC, pump, valve, actuator or setpoint.

@@ -7,13 +7,19 @@ import sys
 import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
+import os
 import uvicorn
 from fastapi import FastAPI
+from env_loader import load_env_file
 
 # Add directory to sys.path
 root_dir = Path(__file__).resolve().parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
+
+# Load this backend's local settings before importing modules that read the
+# environment. Existing process variables win over values in the local file.
+load_env_file(root_dir / ".env")
 
 from database import Database
 from stream import TagStream
@@ -27,7 +33,11 @@ orch = OpsLensOrchestrator(db=db, stream=stream)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await orch.start_streaming()
+    # Readings already stored in SQLite have already contributed to persisted
+    # incidents. Replaying them on every server restart inflates repeat counts
+    # and reruns the full event pipeline; subscribe only to rows added after
+    # this process starts.
+    await orch.start_streaming(from_latest=True)
     try:
         yield
     finally:
@@ -39,4 +49,7 @@ app.router.lifespan_context = lifespan
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    host = os.getenv("OPSLENS_HOST", "0.0.0.0")
+    port = int(os.getenv("OPSLENS_PORT", "8001"))
+    print(f"Starting OpsLens Gateway Server on http://{host}:{port}...")
+    uvicorn.run(app, host=host, port=port)

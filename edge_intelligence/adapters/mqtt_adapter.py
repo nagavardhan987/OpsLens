@@ -76,7 +76,7 @@ class MQTTAdapter(BaseAdapter):
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from models import TagReading, current_iso_utc
+        from models import TagReading
         from tag_registry import TAG_REGISTRY
 
         while self._connected:
@@ -86,15 +86,20 @@ class MQTTAdapter(BaseAdapter):
                 # Expected MQTT payload: {"tag": "VLV-04-POS", "value": 43.0, ...}
                 tag = payload.get("tag") or payload.get("tag_id")
                 value = payload.get("value")
-                if tag and value is not None:
+                timestamp = payload.get("timestamp")
+                if tag and value is not None and timestamp:
                     reg = TAG_REGISTRY.get(tag)
                     yield TagReading(
                         tag=tag,
                         value=value,
-                        timestamp=payload.get("timestamp", current_iso_utc()),
+                        timestamp=timestamp,
                         unit=reg.unit if reg else payload.get("unit", ""),
                         equipment_id=reg.equipment_id if reg else payload.get("equipment_id", "UNKNOWN"),
+                        alarm_state=payload.get("alarm_state"),
+                        alarm_severity=payload.get("alarm_severity", payload.get("severity")),
                     )
+                elif tag and value is not None:
+                    logger.warning("[MQTTAdapter] Skipping %s reading without a source timestamp.", tag)
             except asyncio.TimeoutError:
                 continue
 

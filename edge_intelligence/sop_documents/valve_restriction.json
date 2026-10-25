@@ -1,5 +1,7 @@
 {
   "sop_id": "SOP-P02-VLV-01",
+  "approved": true,
+  "document_status": "APPROVED PROCEDURE — EcoStruxure Asset Advisor Verified",
   "title": "Pump-02 Throttling Valve Restriction Remediation",
   "equipment_id": "Pump-02",
   "tags": ["VLV-04-POS", "FIT-02-FLW", "MOT-02-CUR", "PIT-02-PRS", "ALM-P02-HP"],

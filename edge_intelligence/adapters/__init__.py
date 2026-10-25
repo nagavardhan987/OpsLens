@@ -1,4 +1,4 @@
-"""OpsLens Adapters package — HMI-agnostic telemetry ingestion layer."""
+"""OpsLens Adapters package â€” HMI-agnostic telemetry ingestion layer."""
 from .base import BaseAdapter
 from .simulator_adapter import SimulatorAdapter
 

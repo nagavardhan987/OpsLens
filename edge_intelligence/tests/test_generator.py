@@ -263,6 +263,26 @@ class TestSyntheticDataGenerator(unittest.TestCase):
 
         asyncio.run(run_async())
 
+    def test_valve_restriction_recovery_returns_values_to_baseline_and_clears_alarm(self):
+        """The corrective-action demo emits source-timestamped recovery data, not control writes."""
+        async def run_recovery():
+            list(self.generator.run_scenario("valve_restriction", speed_multiplier=float("inf")))
+            recovery = [r async for r in self.generator.run_valve_restriction_recovery_async(speed_multiplier=float("inf"))]
+            by_tag = {}
+            for reading in recovery:
+                by_tag.setdefault(reading.tag, []).append(reading)
+            self.assertGreater(len(by_tag["PIT-02-PRS"]), 1)
+            self.assertTrue(by_tag["ALM-P02-HP"][0].value)
+            self.assertFalse(by_tag["ALM-P02-HP"][-1].value)
+            for tag in ("VLV-04-POS", "FIT-02-FLW", "MOT-02-CUR", "PIT-02-PRS"):
+                final = float(by_tag[tag][-1].value)
+                entry = TAG_REGISTRY[tag]
+                midpoint = (entry.baseline_min + entry.baseline_max) / 2.0
+                self.assertAlmostEqual(final, midpoint, places=2)
+            times = [r.timestamp for r in by_tag["ALM-P02-HP"]]
+            self.assertEqual(times, sorted(times))
+        asyncio.run(run_recovery())
+
 
 if __name__ == "__main__":
     unittest.main()

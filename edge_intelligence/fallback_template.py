@@ -3,7 +3,7 @@ OpsLens - Deterministic Fallback Template Generator (Component 8)
 
 Generates contract-compliant Guidance deterministically from input facts when
 the external LLM API is unavailable, times out, or fails.
-Guarantees zero numerical alteration and valid, non-empty operator guidance.
+Preserves supplied evidence details and avoids creating unsupported procedure steps.
 """
 
 import re
@@ -35,24 +35,16 @@ def generate_sop_guidance(
     sop_match: SopMatch
 ) -> Guidance:
     """
-    Formulate certified plant guidance directly from retrieved SOP and inference facts.
-    Guarantees 100% adherence to approved standard operating procedures and zero hallucinations.
+    Return only retrieved procedure steps; this deterministic path does not invent filler actions.
     """
     tag = evidence.likely_contributor_tag
-    conf = evidence.confidence_label
     causal = story.causal_label
     deltas_summary = format_deltas_summary(evidence)
 
     if deltas_summary:
-        explanation = (
-            f"{causal} identified with {conf} confidence, primarily attributed to {tag}. "
-            f"Key contributing deviations include {deltas_summary}."
-        )
+        explanation = f"{causal}. The evidence ranking selects {tag} as the leading contributor; supporting deviations: {deltas_summary}."
     else:
-        explanation = (
-            f"{causal} identified with {conf} confidence, primarily attributed to {tag}. "
-            f"Execute recovery procedures according to standard operating limits."
-        )
+        explanation = "Operator verification required. Supporting deviations are unavailable."
 
     actions: List[str] = []
     for step in sop_match.steps:
@@ -62,13 +54,13 @@ def generate_sop_guidance(
         if len(actions) >= 3:
             break
 
-    default_actions = [
-        f"Review operating parameters against {sop_match.sop_id} limits.",
-        "Notify control room supervisor of active excursion.",
-        "Monitor equipment vibration and pressure trends for stability."
-    ]
-    while len(actions) < 3:
-        actions.append(default_actions[len(actions)])
+    if not actions:
+        return Guidance(
+            event_id=evidence.event_id,
+            explanation_text="Operator verification required. No usable procedure steps were retrieved.",
+            next_best_actions=["Operator verification required."],
+            cited_sop_id="NONE",
+        )
 
     return Guidance(
         event_id=evidence.event_id,
@@ -86,15 +78,9 @@ def generate_fallback_guidance(
     """
     Construct safe deterministic Guidance when no SOP is available or when LLM/SLM fails.
     """
-    sop_id = (
-        sop_match.sop_id
-        if (sop_match and sop_match.sop_id and sop_match.sop_id not in ("UNKNOWN-SOP", "SOP-NONE", "NONE"))
-        else "NONE"
-    )
-
     return Guidance(
         event_id=evidence.event_id,
         explanation_text="Operator verification required.",
         next_best_actions=["Operator verification required."] * 3,
-        cited_sop_id=sop_id
+        cited_sop_id="NONE"
     )

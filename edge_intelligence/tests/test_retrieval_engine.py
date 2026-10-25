@@ -110,6 +110,28 @@ class TestRetrievalEngineUnit(unittest.TestCase):
         self.assertEqual(match.sop_id, "SOP-C01-BRG-01")
         self.assertEqual(match.source, "bm25")
 
+    def test_bm25_does_not_cross_match_another_equipment(self):
+        """A Tank-01 incident must not inherit a Pump-02 seal SOP by tag overlap."""
+        retriever = SopRetriever(db=self.db, force_source="bm25")
+        match = retriever.retrieve(
+            primary_tag="TNK-01-LVL",
+            telemetry_snapshot={"equipment": "Tank-01"},
+            custom_query="Pump-02 seal leak low flow suction buffer tank TNK-01-LVL",
+            persist=False,
+        )
+        self.assertNotEqual(match.sop_id, "SOP-P02-SEAL-01")
+
+    def test_bm25_still_matches_the_correct_equipment(self):
+        retriever = SopRetriever(db=self.db, force_source="bm25")
+        match = retriever.retrieve(
+            primary_tag="FIT-02-FLW",
+            telemetry_snapshot={"equipment": "Pump-02"},
+            custom_query="Pump-02 mechanical seal leak low flow pressure reduction",
+            persist=False,
+        )
+        self.assertEqual(match.sop_id, "SOP-P02-SEAL-01")
+        self.assertEqual(match.why_retrieved["equipment"], "Pump-02")
+
 
 if __name__ == "__main__":
     unittest.main()

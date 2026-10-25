@@ -56,7 +56,7 @@ class RESTAdapter(BaseAdapter):
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from models import TagReading, current_iso_utc
+        from models import TagReading
         from tag_registry import TAG_REGISTRY
 
         while self._connected:
@@ -69,15 +69,20 @@ class RESTAdapter(BaseAdapter):
                     for item in readings:
                         tag = item.get("tag") or item.get("tag_id")
                         value = item.get("value")
-                        if tag and value is not None:
+                        timestamp = item.get("timestamp")
+                        if tag and value is not None and timestamp:
                             reg = TAG_REGISTRY.get(tag)
                             yield TagReading(
                                 tag=tag,
                                 value=value,
-                                timestamp=item.get("timestamp", current_iso_utc()),
+                                timestamp=timestamp,
                                 unit=reg.unit if reg else item.get("unit", ""),
                                 equipment_id=reg.equipment_id if reg else item.get("equipment_id", "UNKNOWN"),
+                                alarm_state=item.get("alarm_state"),
+                                alarm_severity=item.get("alarm_severity", item.get("severity")),
                             )
+                        elif tag and value is not None:
+                            logger.warning("[RESTAdapter] Skipping %s reading without a source timestamp.", tag)
             except Exception as e:
                 logger.debug(f"[RESTAdapter] Poll error: {e}")
             await asyncio.sleep(REST_POLL_INTERVAL)

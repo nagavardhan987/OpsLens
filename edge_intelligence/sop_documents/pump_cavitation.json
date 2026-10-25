@@ -1,0 +1,30 @@
+{
+  "sop_id": "SOP-P02-CAV-01",
+  "document_status": "APPROVED PROCEDURE — EcoStruxure Asset Advisor Verified",
+  "title": "Pump-02 Low Flow Cavitation & Suction Recovery Procedure",
+  "equipment_id": "Pump-02",
+  "tags": ["FIT-02-FLW", "PIT-02-PRS", "MOT-02-CUR", "VLV-04-POS"],
+  "keywords": [
+    "cavitation",
+    "low flow",
+    "suction pressure drop",
+    "erratic discharge pressure",
+    "hydraulic starvation",
+    "npsh margin",
+    "impeller vapor pocket"
+  ],
+  "reference_limits": {
+    "min_flow_limit": 55.0,
+    "unit_flow": "L/min",
+    "min_suction_pressure": 1.2,
+    "nominal_baseline": "Flow 75-90 L/min, Pressure 4.2-5.2 bar, Current 7.5-8.2 A"
+  },
+  "steps": [
+    "Acknowledge abnormal flow deviation on Pump-02 supervisory display.",
+    "Verify that discharge valve VLV-04-POS is fully open to rule out downstream throttling restriction.",
+    "Observe discharge pressure PIT-02-PRS fluctuation and flow rate FIT-02-FLW dropping below 55 L/min.",
+    "Check upstream buffer tank TNK-01-LVL to verify adequate suction head (NPSHa > NPSHr).",
+    "Reduce pump speed by 15% or throttle suction booster valve to collapse vapor cavitation pockets.",
+    "Inspect pump volute and impeller for cavitation pitting noise; restore normal flow above 75 L/min."
+  ]
+}

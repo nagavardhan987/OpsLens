@@ -1,5 +1,7 @@
 {
   "sop_id": "SOP-C01-BRG-01",
+  "approved": true,
+  "document_status": "APPROVED PROCEDURE — EcoStruxure Machine Expert Verified",
   "title": "Compressor-01 Drive-End Bearing Vibration & Fatigue Response",
   "equipment_id": "Compressor-01",
   "tags": ["CMP-01-VIB", "CMP-01-CUR", "CMP-01-TMP", "ALM-C01-VB"],

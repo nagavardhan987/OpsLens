@@ -73,6 +73,16 @@ def get_bm25_fallback():
     return _BM25_INDEX, _BM25_SOPS
 
 
+def _equipment_matches(document: Dict[str, Any], equipment: Optional[str]) -> bool:
+    """Do not return a procedure authored for another equipment unit."""
+    if not equipment:
+        return True
+    document_equipment = str(document.get("equipment") or document.get("equipment_id") or "").strip()
+    # Generic documents still need an explicit equipment match; otherwise a
+    # semantically similar procedure can leak across unrelated assets.
+    return document_equipment.casefold() == equipment.strip().casefold()
+
+
 class SopRetriever:
     """
     SOP retrieval engine using Qdrant vector similarity search.
@@ -80,8 +90,11 @@ class SopRetriever:
     Vector store: local Qdrant service (or persistent embedded Qdrant)
     """
 
-    def __init__(self, db: Optional[Database] = None):
+    def __init__(self, db: Optional[Database] = None, force_source: Optional[str] = None):
         self.db = db
+        if force_source not in (None, "qdrant_vector_search", "bm25"):
+            raise ValueError("force_source must be qdrant_vector_search, bm25, or None")
+        self.force_source = force_source
 
     # ------------------------------------------------------------------
     # Contextual Query Builder
@@ -162,6 +175,15 @@ class SopRetriever:
 
         return "\n".join(parts) if parts else (primary_tag or "industrial equipment anomaly")
 
+    def build_query(self, story=None, evidence=None, primary_tag=None, telemetry_snapshot=None):
+        """Backward-compatible alias for callers using the pre-Qdrant API."""
+        return self.build_contextual_query(
+            story=story,
+            evidence=evidence,
+            primary_tag=primary_tag,
+            telemetry_snapshot=telemetry_snapshot,
+        )
+
     # ------------------------------------------------------------------
     # Retrieval
     # ------------------------------------------------------------------
@@ -174,6 +196,7 @@ class SopRetriever:
         persist: bool = True,
         top_k: int = 5,
         telemetry_snapshot: Optional[Dict[str, Any]] = None,
+        custom_query: Optional[str] = None,
     ) -> SopMatch:
         """
         Retrieve the most relevant SOP using Qdrant semantic search.
@@ -189,8 +212,15 @@ class SopRetriever:
         event_id = (story.event_id if story else
                     (evidence.event_id if evidence else "unknown-event"))
 
-        query_context = self.build_contextual_query(story, evidence, primary_tag, telemetry_snapshot)
+        query_context = custom_query or self.build_contextual_query(story, evidence, primary_tag, telemetry_snapshot)
         timestamp = datetime.now(timezone.utc).isoformat()
+        equipment_filter = (telemetry_snapshot or {}).get("equipment")
+        if not equipment_filter and primary_tag:
+            try:
+                from tag_registry import get_tag_entry
+                equipment_filter = get_tag_entry(primary_tag).equipment_id
+            except (KeyError, AttributeError):
+                equipment_filter = None
 
         # Attempt Qdrant semantic search
         match = None
@@ -201,13 +231,17 @@ class SopRetriever:
         query_embedding = None
 
         try:
+            if self.force_source == "bm25":
+                raise RuntimeError("BM25 selected by caller")
             model = get_embed_model()
             query_embedding = model.encode([query_context], convert_to_numpy=True)[0]
             qdrant = get_qdrant_store()
-            equipment_filter = telemetry_snapshot.get("equipment") if telemetry_snapshot else None
             results = qdrant.search(query_vector=query_embedding.tolist(), top_k=top_k,
                                     equipment_filter=equipment_filter,
                                     plant_area_filter=telemetry_snapshot.get("plant_area") if telemetry_snapshot else None)
+            if equipment_filter:
+                results = [result for result in results
+                           if _equipment_matches(result.payload, equipment_filter)]
 
             if not results:
                 raise RuntimeError("Qdrant returned no SOP chunks")
@@ -230,7 +264,7 @@ class SopRetriever:
 
                 best_sop_id = max(sop_scores, key=sop_scores.get)
                 raw_similarity = sop_scores[best_sop_id]
-                retrieved_chunks = [r.to_dict() for r in results]
+                retrieved_chunks = [r.to_dict() for r in results if r.sop_id == best_sop_id]
 
                 # Get full SOP doc for steps
                 full_sop = qdrant.get_document(best_sop_id)
@@ -247,17 +281,27 @@ class SopRetriever:
                 bm25, sops = get_bm25_fallback()
                 tokens = re.findall(r"[A-Za-z0-9_\-]+", query_context.lower())
                 raw_scores = bm25.get_scores(tokens)
-                best_idx = max(range(len(raw_scores)), key=lambda idx: raw_scores[idx])
-                max_s = float(max(raw_scores))
+                eligible_indices = [i for i, sop in enumerate(sops)
+                                    if _equipment_matches(sop, equipment_filter)]
+                max_s = max((float(raw_scores[i]) for i in eligible_indices), default=0.0)
                 raw_similarity = max_s
-                best_sop = sops[best_idx]
-                best_sop_id = best_sop.get("sop_id", "UNKNOWN")
-                sop_title = best_sop.get("title", "Unknown SOP")
-                steps = best_sop.get("steps", [])
-                equipment_matched = best_sop.get("equipment_id", "")
-                retrieved_chunks = [{"text": s, "section": "step", "sop_id": best_sop_id} for s in steps[:5]]
                 candidates_log = [{"sop_id": sops[i].get("sop_id"), "keyword_score": float(raw_scores[i])}
-                                   for i in range(len(sops))]
+                                   for i in eligible_indices]
+                if max_s > 0:
+                    if max_s <= 0:
+                        best_sop_id, sop_title, steps, equipment_matched = "SOP-NONE", "No relevant SOP found", [], ""
+                        retrieved_chunks = []
+                    else:
+                        best_idx = max(eligible_indices, key=lambda idx: float(raw_scores[idx]))
+                        best_sop = sops[best_idx]
+                        best_sop_id = best_sop.get("sop_id", "UNKNOWN")
+                        sop_title = best_sop.get("title", "Unknown SOP")
+                        steps = best_sop.get("steps", [])
+                        equipment_matched = best_sop.get("equipment_id", "")
+                        retrieved_chunks = [{"text": s, "section": "step", "sop_id": best_sop_id} for s in steps[:5]]
+                else:
+                    best_sop_id, sop_title, steps, equipment_matched = "SOP-NONE", "No relevant SOP found", [], ""
+                    retrieved_chunks = []
             except Exception as e2:
                 logger.error(f"[SopRetriever] BM25 also failed: {e2}")
                 best_sop_id, sop_title, steps, equipment_matched = "SOP-NONE", "No SOP Found", [], ""
@@ -319,8 +363,9 @@ class SopRetriever:
         if persist and self.db:
             self.db.save_sop_match(sop_match)
 
+        score_name = "semantic_similarity" if retrieval_method == "qdrant_vector_search" else "keyword_score"
         logger.info(
             f"[SopRetriever] event={event_id} -> SOP={best_sop_id} "
-            f"semantic_similarity={raw_similarity:.4f} method={retrieval_method}"
+            f"{score_name}={raw_similarity:.4f} method={retrieval_method}"
         )
         return sop_match

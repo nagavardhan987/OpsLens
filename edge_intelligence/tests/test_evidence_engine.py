@@ -108,6 +108,29 @@ class TestEvidenceEngineUnit(unittest.TestCase):
         self.assertIn(evidence.confidence_label, ["MEDIUM", "LOW"])
         self.assertLessEqual(evidence.confidence_score, 0.60)
 
+    def test_score_breakdown_includes_timestamped_reading_and_configured_range(self):
+        """Evidence audit exposes the actual observation used alongside the unchanged score."""
+        fixture = CorrelatedEvent(
+            event_id="test-evidence-observation",
+            primary_tag="ALM-P02-HP",
+            primary_alarm=True,
+            trigger_timestamp="2026-09-11T12:00:00Z",
+            raw_deviation_pct=40.0,
+            clustered_tags=["VLV-04-POS"],
+            correlated_deviations=[CorrelatedDeviation(
+                tag="VLV-04-POS", deviation_pct=-40.0, timestamp="2026-09-11T11:59:00Z",
+                precedes_primary=True, topology_distance=1
+            )],
+            temporal_context={"telemetry": [{
+                "tag": "VLV-04-POS", "value": 43.0, "unit": "%", "timestamp": "2026-09-11T11:59:00Z"
+            }]}
+        )
+        self.evidence_engine.evaluate_event(fixture, persist=True)
+        audit = self.db.get_evidence_audit(fixture.event_id)["scoring_breakdown"]["tag_scores"]["VLV-04-POS"]
+        self.assertEqual(audit["observed_reading"]["value"], 43.0)
+        self.assertEqual(audit["observed_reading"]["timestamp"], "2026-09-11T11:59:00Z")
+        self.assertEqual(audit["observed_reading"]["configured_range"], [70.0, 85.0])
+
     def test_empty_deviations_defaults_low(self):
         """Isolated candidate event with zero deviations defaults to LOW."""
         empty_event = CorrelatedEvent(

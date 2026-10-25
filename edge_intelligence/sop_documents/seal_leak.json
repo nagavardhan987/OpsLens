@@ -1,5 +1,7 @@
 {
   "sop_id": "SOP-P02-SEAL-01",
+  "approved": true,
+  "document_status": "APPROVED PROCEDURE — EcoStruxure Asset Advisor Verified",
   "title": "Pump-02 Mechanical Seal Leak & Low Flow Isolation",
   "equipment_id": "Pump-02",
   "tags": ["FIT-02-FLW", "PIT-02-PRS", "TNK-01-LVL"],

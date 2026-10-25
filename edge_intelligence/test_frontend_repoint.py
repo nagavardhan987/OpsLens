@@ -15,7 +15,7 @@ import sys
 import uuid
 import unittest
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from database import Database
@@ -23,6 +23,7 @@ from stream import TagStream
 from generator import SyntheticDataGenerator
 from orchestrator import OpsLensOrchestrator
 from api.routes import create_app
+from models import TagReading
 
 
 class TestFrontendRepoint(unittest.TestCase):
@@ -155,6 +156,12 @@ class TestFrontendRepoint(unittest.TestCase):
             self.assertEqual(res_bad_action.status_code, 400)
 
             # Resolve event action
+            alarm_step = next(step for step in reversed(full_a["story"]["steps"]) if step["tag"] == "ALM-P02-HP")
+            clear_time = datetime.fromisoformat(alarm_step["timestamp"].replace("Z", "+00:00")) + timedelta(seconds=2)
+            self.db.insert_reading(TagReading(
+                tag="ALM-P02-HP", value=False, timestamp=clear_time.isoformat().replace("+00:00", "Z"),
+                unit="status", equipment_id="Pump-02"
+            ))
             res_resolve = self.client.post("/api/actions", json={
                 "event_id": event_a_id,
                 "operator": "J. Rivera (Shift 2)",

@@ -41,6 +41,7 @@ OPCUA_USERNAME = os.environ.get("OPCUA_USERNAME", None)
 OPCUA_PASSWORD = os.environ.get("OPCUA_PASSWORD", None)
 OPCUA_NAMESPACE = int(os.environ.get("OPCUA_NAMESPACE", "2"))
 OPCUA_TAG_MAPPING_PATH = os.environ.get("OPCUA_TAG_MAPPING", None)
+OPCUA_ALARM_SEVERITY_MAPPING_PATH = os.environ.get("OPCUA_ALARM_SEVERITY_MAPPING", None)
 OPCUA_POLL_INTERVAL = float(os.environ.get("OPCUA_POLL_INTERVAL", "1.0"))
 
 # Default tag mapping (override with OPCUA_TAG_MAPPING env file)
@@ -64,12 +65,20 @@ class OPCUAAdapter(BaseAdapter):
         self._client = None
         self._connected = False
         self._tag_mapping = self._load_tag_mapping()
+        self._severity_mapping = self._load_severity_mapping()
 
     def _load_tag_mapping(self) -> Dict[str, str]:
         if OPCUA_TAG_MAPPING_PATH and Path(OPCUA_TAG_MAPPING_PATH).exists():
             with open(OPCUA_TAG_MAPPING_PATH, encoding="utf-8") as f:
                 return json.load(f)
         return DEFAULT_TAG_MAPPING
+
+    def _load_severity_mapping(self) -> Dict[str, str]:
+        """Load optional OpsLens tag -> source alarm-severity NodeId mapping."""
+        if OPCUA_ALARM_SEVERITY_MAPPING_PATH and Path(OPCUA_ALARM_SEVERITY_MAPPING_PATH).exists():
+            with open(OPCUA_ALARM_SEVERITY_MAPPING_PATH, encoding="utf-8") as f:
+                return json.load(f)
+        return {}
 
     async def connect(self) -> bool:
         try:
@@ -105,21 +114,31 @@ class OPCUAAdapter(BaseAdapter):
         """
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from models import TagReading, current_iso_utc
+        from models import TagReading, to_iso_utc
         from tag_registry import TAG_REGISTRY
 
         while self._connected:
             for tag_name, node_id in self._tag_mapping.items():
                 try:
                     node = self._client.get_node(node_id)
-                    value = await node.read_value()
+                    data_value = await node.read_data_value()
+                    value = data_value.Value.Value
+                    source_timestamp = data_value.SourceTimestamp or data_value.ServerTimestamp
+                    if source_timestamp is None:
+                        logger.warning("[OPCUAAdapter] Skipping %s reading without a server timestamp.", tag_name)
+                        continue
+                    severity_node_id = self._severity_mapping.get(tag_name)
+                    alarm_severity = None
+                    if severity_node_id:
+                        alarm_severity = await self._client.get_node(severity_node_id).read_value()
                     reg = TAG_REGISTRY.get(tag_name)
                     yield TagReading(
                         tag=tag_name,
                         value=value,
-                        timestamp=current_iso_utc(),
+                        timestamp=to_iso_utc(source_timestamp),
                         unit=reg.unit if reg else "",
                         equipment_id=reg.equipment_id if reg else "UNKNOWN",
+                        alarm_severity=str(alarm_severity) if alarm_severity is not None else None,
                     )
                 except Exception as e:
                     logger.debug(f"[OPCUAAdapter] Failed to read {tag_name}: {e}")
@@ -131,6 +150,7 @@ class OPCUAAdapter(BaseAdapter):
             "connected": self._connected,
             "endpoint": OPCUA_ENDPOINT,
             "tags_configured": len(self._tag_mapping),
+            "severity_tags_configured": len(self._severity_mapping),
             "read_only": True,
             "write_disabled": True,
         }

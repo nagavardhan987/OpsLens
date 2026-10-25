@@ -237,6 +237,46 @@ class SyntheticDataGenerator:
 
         self.current_scenario = None
 
+    async def run_valve_restriction_recovery_async(
+        self,
+        speed_multiplier: float = 10.0,
+        recovery_seconds: float = 16.0,
+    ) -> AsyncGenerator[TagReading, None]:
+        """Emit an explicitly synthetic recovery trajectory for Pump-02.
+
+        This is a simulator-only demonstration action. It emits timestamped
+        readings that return the four process values to registry midpoints and
+        deassert the high-pressure alarm after its configured trip clears.
+        It never sends commands to an adapter, PLC, actuator, or setpoint.
+        """
+        start = {"VLV-04-POS": 43.0, "FIT-02-FLW": 56.0, "MOT-02-CUR": 9.2, "PIT-02-PRS": 6.9}
+        targets = {
+            tag: (TAG_REGISTRY[tag].baseline_min + TAG_REGISTRY[tag].baseline_max) / 2.0
+            for tag in start
+        }
+        steps = max(1, int(recovery_seconds / self.sample_interval))
+        delay = self.sample_interval / speed_multiplier if speed_multiplier > 0 and not math.isinf(speed_multiplier) else 0
+        for step in range(steps + 1):
+            progress = step / steps
+            values = {tag: round(start[tag] + (targets[tag] - start[tag]) * progress, 2) for tag in start}
+            values["ALM-P02-HP"] = values["PIT-02-PRS"] >= 6.5
+            ts = to_iso_utc(self.sim_clock)
+            readings = []
+            for tag, entry in TAG_REGISTRY.items():
+                value = values.get(tag)
+                if value is None:
+                    value = entry.baseline_min if entry.data_type == "bool" else (
+                        (entry.baseline_min + entry.baseline_max) / 2.0 if entry.data_type == "float" else "NORMAL"
+                    )
+                reading = TagReading(tag=tag, value=value, timestamp=ts, unit=entry.unit, equipment_id=entry.equipment_id)
+                self.db.insert_reading(reading)
+                readings.append(reading)
+            self.sim_clock += timedelta(seconds=self.sample_interval)
+            for reading in readings:
+                yield reading
+            if delay:
+                await asyncio.sleep(delay)
+
     def stream_nominal(
         self,
         duration_seconds: float,

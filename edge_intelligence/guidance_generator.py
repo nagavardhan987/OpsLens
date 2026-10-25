@@ -58,11 +58,11 @@ class GuidanceGenerator:
 
     def is_sop_available(self, sop_match: Optional[SopMatch]) -> bool:
         """
-        Determine whether a valid, approved SOP procedure was retrieved for this incident.
+        Determine whether a sufficiently relevant, sourced SOP procedure was retrieved.
         Returns True if:
         - sop_match exists and is not None
         - sop_id is valid (not empty, not UNKNOWN-SOP, not SOP-NONE, not NONE)
-        - steps has at least 1 certified action step
+        - steps has at least 1 source document action step
         - match_score meets or exceeds min_sop_score
         """
         if sop_match is None:
@@ -71,16 +71,25 @@ class GuidanceGenerator:
             return False
         if not sop_match.steps or len(sop_match.steps) == 0:
             return False
-        if sop_match.retrieval_method != "qdrant_vector_search" or sop_match.semantic_similarity is None:
-            return False
-        if sop_match.semantic_similarity < self.min_sop_score:
-            return False
-        return True
+        if sop_match.retrieval_method == "qdrant_vector_search":
+            return sop_match.semantic_similarity is not None and sop_match.semantic_similarity >= self.min_sop_score
+        if sop_match.retrieval_method == "bm25":
+            keyword_score = (sop_match.why_retrieved or {}).get("keyword_score")
+            return isinstance(keyword_score, (int, float)) and keyword_score > 0
+        return False
 
     def is_online(self) -> bool:
-        """Check if cloud connectivity and keys are available for online Cloud LLM."""
+        """Use the configured OpsLens provider as the source of provider selection."""
         if self._force_online is not None:
             return self._force_online
+        try:
+            from llm_provider import configuration_error, selected_provider
+            provider = selected_provider()
+            if provider not in ("", "none", "off", "disabled"):
+                return configuration_error() is None
+        except Exception:
+            # Keep compatibility with older standalone deployments.
+            pass
         return check_online_availability()
 
     def generate(
@@ -99,9 +108,9 @@ class GuidanceGenerator:
            a. If api_caller is explicitly provided (for testing/mocking):
               Run LLM synthesis via caller.
            b. FIRST: Inference and SOP are retrieved.
-              If an approved SOP is available:
+              If a sufficiently relevant SOP source is available:
               Formulate guidance directly from retrieved SOP + Evidence facts!
-              (source="sop_retrieval", zero latency, 100% adherence to plant procedures).
+                (source="sop_retrieval", based on the retrieved source text).
            c. IF SOP NOT AVAILABLE (novel incident / uncataloged excursion / low match score):
               Synthesize guidance dynamically:
               - If online: Cloud LLM (Gemini 2.5 Flash / OpenAI / Anthropic).
@@ -131,6 +140,13 @@ class GuidanceGenerator:
             grounded_sop = self.is_sop_available(sop_match)
             guidance = generate_sop_guidance(story, evidence, sop_match) if grounded_sop else generate_fallback_guidance(story, evidence, sop_match)
             self._save_and_cache(guidance, source="sop_fallback" if grounded_sop else "fallback")
+            return guidance
+
+        # Never ask an LLM/SLM to invent a procedure when no sufficiently relevant
+        # retrieved SOP with usable steps is available.
+        if not self.is_sop_available(sop_match):
+            guidance = generate_fallback_guidance(story, evidence, sop_match)
+            self._save_and_cache(guidance, source="fallback")
             return guidance
 
         # 4. If an injected api_caller is set (e.g. unit testing/mocking), invoke caller
@@ -171,18 +187,34 @@ class GuidanceGenerator:
         source = "fallback"
         raw_response: Optional[str] = None
 
+        try:
+            from llm_provider import selected_provider
+            configured_provider = selected_provider()
+        except Exception:
+            configured_provider = ""
+
         if self.is_online():
             logger.info(f"[Guidance] SOP not available for event {event_id}. Online mode active: calling Cloud LLM.")
             raw_response = self._call_cloud_llm(prompt)
             source = "cloud_llm"
-            if not raw_response:
+            # A selected provider is authoritative. In particular, a failed
+            # Groq request must use deterministic guidance rather than silently
+            # probing a different local model (which may be unconfigured).
+            if not raw_response and configured_provider in ("", "none", "off", "disabled"):
                 logger.warning(f"[Guidance] Cloud LLM returned no response. Failing over to local Ollama edge SLM.")
                 raw_response = self._call_edge_slm(prompt)
                 source = "edge_slm"
-        else:
+        elif configured_provider in ("", "none", "off", "disabled"):
             logger.info(f"[Guidance] SOP not available for event {event_id}. Offline mode active: calling Ollama edge SLM.")
             raw_response = self._call_edge_slm(prompt)
             source = "edge_slm"
+        else:
+            # A selected cloud provider with missing configuration is an
+            # explicit setup error, not permission to probe another model.
+            logger.warning(
+                "[Guidance] Selected provider %s is not configured; using deterministic guidance",
+                configured_provider,
+            )
 
         if raw_response:
             expected_sop = (
@@ -215,9 +247,19 @@ class GuidanceGenerator:
 
     def _call_cloud_llm(self, prompt: str) -> Optional[str]:
         """
-        Invoke Cloud LLM with strict timeout.
-        Tries Gemini API first, then OpenAI, then Anthropic based on configured keys.
+        Invoke the configured OpsLens provider. Legacy key-based selection is
+        retained only for deployments that have not selected a provider.
         """
+        try:
+            from llm_provider import complete_chat, selected_provider
+            if selected_provider() not in ("", "none", "off", "disabled"):
+                return complete_chat(prompt, timeout=self.timeout)
+        except Exception as e:
+            # Provider errors are sanitized by llm_provider; don't log exception
+            # text here because third-party clients can include request details.
+            logger.warning("[Guidance] Configured provider call failed (%s)", getattr(e, "kind", "unavailable"))
+            return None
+
         gemini_key = os.environ.get("GEMINI_API_KEY")
         openai_key = os.environ.get("OPENAI_API_KEY")
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -404,8 +446,15 @@ class GuidanceGenerator:
             allowed_text.append(sop_match.query_context or "")
             trace = sop_match.rag_trace or {}
             allowed_text.append(str(trace.get("process_context", {})))
-        allowed_numbers = {float(n) for source in allowed_text for n in re.findall(r"\d+(?:\.\d+)?", source)}
-        for token in re.findall(r"\d+(?:\.\d+)?", text):
+        # Digits inside equipment/SOP identifiers (e.g. VLV-04-POS) are labels,
+        # not process values that need numerical grounding validation.
+        identifier_pattern = r"\b[A-Z][A-Z0-9]*-\d+(?:-[A-Z0-9]+)*\b"
+        allowed_numbers = {
+            float(n) for source in allowed_text
+            for n in re.findall(r"\d+(?:\.\d+)?", re.sub(identifier_pattern, "", source, flags=re.IGNORECASE))
+        }
+        explanation_numbers = re.sub(identifier_pattern, "", text, flags=re.IGNORECASE)
+        for token in re.findall(r"\d+(?:\.\d+)?", explanation_numbers):
             if float(token) not in allowed_numbers:
                 logger.warning(f"[Guidance] Unsupported numeric value {token} in generated guidance")
                 return False

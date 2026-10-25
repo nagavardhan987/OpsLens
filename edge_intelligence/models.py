@@ -33,15 +33,18 @@ def to_iso_utc(dt: datetime) -> str:
 class TagReading(BaseModel):
     """
     TagReading schema:
-    { "tag": str, "value": float|bool|str, "timestamp": ISO8601 str,
+    { "tag": str, "value": float|bool|str|None, "timestamp": ISO8601 str,
       "unit": str, "equipment_id": str }
     """
     tag: str
-    value: Union[float, bool, str]
+    value: Optional[Union[float, bool, str]] = None
     timestamp: str
     unit: str
     equipment_id: str
     alarm_state: Optional[str] = None
+    # Alarm priority/severity passed through from the configured source when supplied.
+    # This is not inferred from OpsLens evidence weights.
+    alarm_severity: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -51,6 +54,7 @@ class TagReading(BaseModel):
             "unit": self.unit,
             "equipment_id": self.equipment_id,
             "alarm_state": self.alarm_state,
+            "alarm_severity": self.alarm_severity,
         }
 
 
@@ -90,6 +94,52 @@ class TagRegistryEntry(BaseModel):
 
 
 # -----------------------------------------------------------------------------
+# Prioritization, Urgency & Lifecycle Contracts (Phase 2 & Phase 3)
+# -----------------------------------------------------------------------------
+
+class TimeToLimitEstimate(BaseModel):
+    time_to_limit_seconds: Optional[float] = None
+    target_limit: float
+    current_value: float
+    rate_per_second: float
+    direction: Literal["rising", "falling", "steady"]
+    confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    assumptions: str
+    timestamp: str
+
+
+class UrgencyAssessment(BaseModel):
+    source_priority: Optional[str] = None
+    urgency_score: Optional[float] = None
+    urgency_band: Literal["URGENT", "ELEVATED", "ROUTINE", "UNKNOWN"] = "UNKNOWN"
+    urgency_reasons: List[str] = Field(default_factory=list)
+    triggered_rules: List[str] = Field(default_factory=list)
+    data_quality: Literal["VALID", "DEGRADED", "STALE", "INVALID"] = "VALID"
+    time_to_limit: Optional[TimeToLimitEstimate] = None
+    ttl_unavailable_reason: Optional[str] = None
+    ranking_timestamp: str = Field(default_factory=current_iso_utc)
+    scoring_breakdown: Dict[str, float] = Field(default_factory=dict)
+
+
+class IndividualAlarmRecord(BaseModel):
+    alarm_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    source_event_id: Optional[str] = None
+    tag: str
+    equipment_id: str
+    alarm_type: str = "EXCURSION"
+    value: Union[float, bool, str]
+    threshold: Optional[float] = None
+    source_priority: Optional[str] = None
+    lifecycle_state: Literal["NEW", "ACTIVE", "ACKNOWLEDGED", "CLEARED", "RECURRING"] = "ACTIVE"
+    repeat_count: int = 1
+    first_seen_timestamp: str
+    last_seen_timestamp: str
+    cleared_timestamp: Optional[str] = None
+    acknowledged_timestamp: Optional[str] = None
+    fingerprint: str = ""
+
+
+# -----------------------------------------------------------------------------
 # Downstream Engines Contracts (For Complete Contract Integrity)
 # -----------------------------------------------------------------------------
 
@@ -106,6 +156,15 @@ class CandidateEvent(BaseModel):
     trigger_timestamp: str
     raw_deviation_pct: float
     clustered_tags: List[str] = Field(default_factory=list)
+    alarm_severity: Optional[str] = None
+    # Prioritization & lifecycle extensions (backward-compatible)
+    source_priority: Optional[str] = None
+    urgency: Optional[UrgencyAssessment] = None
+    repeat_count: int = 1
+    lifecycle_state: str = "ACTIVE"
+    first_seen_timestamp: Optional[str] = None
+    last_seen_timestamp: Optional[str] = None
+    individual_alarms: List[IndividualAlarmRecord] = Field(default_factory=list)
 
 
 class CorrelatedDeviation(BaseModel):
@@ -233,3 +292,94 @@ class HandoverSummary(BaseModel):
     events: List[str] = Field(default_factory=list)
     actions: List[OperatorAction] = Field(default_factory=list)
     open_events: List[str] = Field(default_factory=list)
+
+
+class ContextWindow(BaseModel):
+    start: str
+    end: str
+    duration_minutes: int = 30
+    inclusive: bool = True
+
+
+class ContextReading(BaseModel):
+    tag: str
+    value: Union[float, bool, str]
+    unit: str
+    equipment_id: str
+    timestamp: str
+    timestamp_utc: str
+    source: str = "sqlite.tag_readings"
+
+
+class ContextEventRecord(BaseModel):
+    event_id: str
+    alarm_id: str
+    primary_alarm: bool
+    timestamp: str
+    timestamp_utc: str
+    raw_deviation_pct: Optional[float] = None
+    tags: List[str] = Field(default_factory=list)
+    equipment_id: str
+    configured_severity: Optional[str] = None
+    status: str
+
+
+class ContextOperatorAction(BaseModel):
+    action_id: str
+    event_id: str
+    operator: str
+    action_type: str
+    timestamp: str
+    timestamp_utc: str
+    notes: Optional[str] = None
+
+
+class SelectedEventContext(BaseModel):
+    event_id: str
+    alarm_id: Optional[str] = None
+    primary_tag: Optional[str] = None
+    equipment_id: str
+    configured_severity: Optional[str] = None
+    primary_alarm: Optional[bool] = None
+    timestamp: Optional[str] = None
+    timestamp_source: Optional[str] = None
+    event_story_alarm_timestamp: Optional[str] = None
+    alarm_state_timestamp: Optional[str] = None
+    timestamp_discrepancy: bool = False
+    status: str
+    alarm_state: Optional[Dict[str, Any]] = None
+    recorded_fact_source: str
+
+
+class ContextTopology(BaseModel):
+    equipment_id: str
+    relevant_tags: List[str] = Field(default_factory=list)
+    registry_dependencies: List[Dict[str, str]] = Field(default_factory=list)
+    knowledge_graph_relationships: List[str] = Field(default_factory=list)
+    interpretation: str
+
+
+class ContextIncidentAnalysis(BaseModel):
+    event_story: Optional[Dict[str, Any]] = None
+    evidence: Optional[Dict[str, Any]] = None
+    evidence_audit: Optional[Dict[str, Any]] = None
+    matched_sop: Optional[Dict[str, Any]] = None
+    interpretation: str
+
+
+class IncidentContext(BaseModel):
+    event_id: str
+    reference_timestamp: str
+    window: ContextWindow
+    selected_event: SelectedEventContext
+    readings: List[ContextReading] = Field(default_factory=list)
+    trend_summaries: List[Dict[str, Any]] = Field(default_factory=list)
+    related_events: List[ContextEventRecord] = Field(default_factory=list)
+    operator_actions: List[ContextOperatorAction] = Field(default_factory=list)
+    topology: ContextTopology
+    incident_analysis: ContextIncidentAnalysis
+    data_sources: List[str] = Field(default_factory=list)
+    missing_data: List[str] = Field(default_factory=list)
+    hypotheses: List[str] = Field(default_factory=list)
+    duplicate_readings_removed: int = 0
+    assembly_latency_ms: float

@@ -38,7 +38,7 @@ def build_facts_payload(
     sop_title = (
         sop_match.sop_title
         if (sop_match and sop_match.sop_title)
-        else "No pre-approved SOP available"
+        else "No sufficiently relevant source document available"
     )
     sop_steps = list(sop_match.steps) if (sop_match and sop_match.steps) else []
 
@@ -47,8 +47,8 @@ def build_facts_payload(
         "event_id": evidence.event_id,
         "causal_label": story.causal_label,
         "likely_contributor_tag": evidence.likely_contributor_tag,
-        "confidence_label": evidence.confidence_label,
-        "confidence_score": round(float(evidence.confidence_score), 4),
+        "evidence_ranking_label": evidence.confidence_label,
+        "evidence_ranking_score": round(float(evidence.confidence_score), 4),
         "supporting_deltas": deltas,
         "sop_available": bool(sop_steps and sop_id != "NONE"),
         "sop_id": sop_id,
@@ -56,7 +56,7 @@ def build_facts_payload(
         "sop_steps": sop_steps,
         "incident_context": trace.get("process_context", {}),
         "contextual_query": sop_match.query_context if sop_match else None,
-        "retrieved_qdrant_chunks": sop_match.retrieved_chunks if sop_match else []
+        "retrieved_source_chunks": sop_match.retrieved_chunks if sop_match else []
     }
 
 
@@ -91,14 +91,14 @@ def build_guidance_prompt(
         "Output ONLY a raw, valid JSON object (no markdown, no extra commentary) matching this schema:\n"
         "{\n"
         '  "event_id": "<exact event_id from facts>",\n'
-        '  "explanation_text": "<1-2 sentences explaining the incident, citing likely_contributor_tag, confidence_label, and supporting_deltas without modifying any numbers>",\n'
+        '  "explanation_text": "<1-2 sentences explaining the incident from likely_contributor_tag and supporting_deltas without modifying any numbers>",\n'
         f'  "next_best_actions": ["<{action_task} - item 1>", "<{action_task} - item 2>", "<{action_task} - item 3>"],\n'
         f'  "cited_sop_id": "{sop_id}"\n'
         "}\n\n"
         "CRITICAL CONSTRAINTS:\n"
         "1. explanation_text must be 1-2 concise sentences for an industrial plant operator.\n"
         "2. Do NOT change, round, or recalculate any numbers or percentages in supporting_deltas.\n"
-        f"3. next_best_actions must contain exactly 3 short imperative action items ({action_task}). When evidence is insufficient, use 'Operator verification required.' for the explanation and all three actions.\n"
+        f"3. next_best_actions must contain exactly 3 short action items ({action_task}). Each action must come directly from retrieved SOP steps.\n"
         f"{sop_constraint}"
     )
     return prompt

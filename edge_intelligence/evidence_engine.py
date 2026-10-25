@@ -149,6 +149,10 @@ class EvidenceEngine:
 
         # Score each candidate deviation
         scores: Dict[str, float] = {}
+        telemetry_by_tag = {
+            item.get("tag"): item for item in ((temporal_context or correlated_event.temporal_context).get("telemetry", []))
+            if item.get("tag")
+        }
         for d in candidate_devs:
             result = self.compute_contribution_score(
                 tag=d.tag,
@@ -157,6 +161,16 @@ class EvidenceEngine:
                 precedes_primary=d.precedes_primary
             )
             scores[d.tag] = result["raw_score"]
+            observed = telemetry_by_tag.get(d.tag)
+            registry_entry = self.loader.get_tag(d.tag)
+            if observed:
+                result["observed_reading"] = {
+                    "value": observed.get("value"),
+                    "unit": observed.get("unit"),
+                    "timestamp": observed.get("timestamp"),
+                    "baseline_midpoint": round((registry_entry.baseline_min + registry_entry.baseline_max) / 2.0, 4),
+                    "configured_range": [registry_entry.baseline_min, registry_entry.baseline_max],
+                }
             scoring_breakdown["tag_scores"][d.tag] = result
 
         total_score = sum(scores.values())

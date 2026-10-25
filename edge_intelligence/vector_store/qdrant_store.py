@@ -218,6 +218,7 @@ class QdrantVectorStore(VectorStore):
             "revision": first.get("revision", "1.0"),
             "effective_date": first.get("effective_date", ""),
             "source": first.get("source", "OpsLens SOP Knowledge Base"),
+            "document_status": first.get("document_status"),
             "source_pdf": first.get("source_pdf"),
             "page_count": first.get("page_count"),
             "keywords": first.get("keywords", []),

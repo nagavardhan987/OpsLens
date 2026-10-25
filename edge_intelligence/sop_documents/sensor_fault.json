@@ -1,5 +1,7 @@
 {
   "sop_id": "SOP-GEN-SEN-01",
+  "approved": true,
+  "document_status": "APPROVED PROCEDURE — EcoStruxure Instrumentation Guide",
   "title": "Diagnostic Procedure for Isolated Instrument Sensor Faults",
   "equipment_id": "Generic",
   "tags": ["PIT-02-PRS", "FIT-02-FLW", "CMP-01-VIB", "TNK-01-LVL"],

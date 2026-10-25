@@ -1,0 +1,30 @@
+{
+  "sop_id": "SOP-T01-OVF-01",
+  "document_status": "APPROVED PROCEDURE — EcoStruxure Asset Advisor Verified",
+  "title": "Tank-01 High Liquid Level & Overflow Prevention Response",
+  "equipment_id": "Tank-01",
+  "tags": ["TNK-01-LVL"],
+  "keywords": [
+    "tank level",
+    "overflow",
+    "high level alarm",
+    "buffer tank",
+    "liquid level rise",
+    "inlet shutoff",
+    "drain valve"
+  ],
+  "reference_limits": {
+    "max_trip_limit": 88.0,
+    "unit": "%",
+    "parameter": "tank_level",
+    "nominal_baseline": "55.0 - 65.0%"
+  },
+  "steps": [
+    "Acknowledge High Level Alarm on Tank-01 supervisory display.",
+    "Verify tank level transmitter TNK-01-LVL reading against field sight glass to confirm actual liquid level exceeds 88%.",
+    "Throttle or isolate upstream feed inlet valve to halt inflow into Tank-01.",
+    "Verify downstream transfer pump Pump-02 suction line is unblocked and operational.",
+    "Open emergency overflow recirculation valve to secondary storage vessel Tank-02 if level exceeds 90%.",
+    "Monitor level until TNK-01-LVL recedes below 65% baseline before re-opening main inlet line."
+  ]
+}

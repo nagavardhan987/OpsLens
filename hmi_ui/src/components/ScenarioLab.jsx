@@ -1,5 +1,14 @@
 import React, { useState } from 'react';
-import { Play, RotateCcw, Zap, ShieldCheck, AlertTriangle } from 'lucide-react';
+import { Play, RotateCcw, Zap, ShieldCheck, AlertTriangle, RefreshCw } from 'lucide-react';
+
+function formatTimestamp(value) {
+  if (!value) return 'Just now';
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+  }).format(timestamp);
+}
 
 const defaultScenarios = [
   { scenario_id: 'valve_restriction', name: 'Pump-02 — Valve Restriction' },
@@ -11,7 +20,21 @@ const defaultScenarios = [
   { scenario_id: 'pump_cavitation', name: 'Pump-02 — Cavitation' },
 ];
 
-export default function ScenarioLab({ scenarios, selectedScenario, onSelectScenario, simulating, isIncident, onStart, onResetDemo }) {
+export default function ScenarioLab({
+  scenarios,
+  selectedScenario,
+  onSelectScenario,
+  simulating,
+  isIncident,
+  onStart,
+  onResetDemo,
+  simulationStatus = {},
+  recoveryBusy = false,
+  onSimulatedRecovery,
+  repeatBusy = false,
+  repeatError = '',
+  onTriggerAlarmRepeat,
+}) {
   const [error, setError] = useState('');
   const choices = scenarios.length ? scenarios : defaultScenarios;
 
@@ -41,6 +64,62 @@ export default function ScenarioLab({ scenarios, selectedScenario, onSelectScena
           </button>
         </div>
         {simulating && <div className="flex items-center gap-2 text-sm text-blue-300"><Zap className="w-4 h-4 animate-pulse" /> Scenario accepted. Waiting for the event pipeline; the HMI dashboard will update when the incident is published.</div>}
+        {simulationStatus.status === 'awaiting_corrective_action' && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 p-5 text-sm text-amber-100 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/20 pb-3">
+              <div>
+                <p className="font-bold text-amber-200 text-base">
+                  Synthetic alarm active · {simulationStatus.equipment_id || 'Equipment'}
+                </p>
+                <p className="text-xs text-amber-200/70 mt-0.5">
+                  Alarm ({simulationStatus.alarm_tag || 'Active trip'}) is active in the runtime engine.
+                </p>
+              </div>
+              <div className="flex items-center gap-3 font-mono text-xs">
+                <span className="rounded bg-amber-900/50 border border-amber-500/40 px-2.5 py-1 text-amber-300 font-bold">
+                  Repeat Count: ×{simulationStatus.repeat_count || 1}
+                </span>
+                <span className="text-amber-200/60 text-[11px]">
+                  Last seen: {formatTimestamp(simulationStatus.last_seen_timestamp)}
+                </span>
+              </div>
+            </div>
+
+            <p className="text-xs text-amber-100/80 leading-relaxed">
+              The simulated fault sequence has finished. You can resend the identical active alarm notification to verify deterministic deduplication, or run simulated recovery to restore nominal conditions.
+            </p>
+
+            <div className="flex flex-wrap items-center gap-3 pt-1">
+              <button
+                type="button"
+                onClick={onTriggerAlarmRepeat}
+                disabled={repeatBusy || recoveryBusy}
+                className="h-10 px-4 rounded-lg border border-amber-500/50 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-xs font-bold flex items-center gap-2 transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${repeatBusy ? 'animate-spin' : ''}`} />
+                {repeatBusy ? 'SENDING NOTIFICATION…' : 'TRIGGER SAME ALARM AGAIN'}
+              </button>
+
+              <button
+                type="button"
+                onClick={onSimulatedRecovery}
+                disabled={recoveryBusy || repeatBusy}
+                className="h-10 px-4 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold flex items-center gap-2 transition-colors disabled:opacity-50"
+              >
+                {recoveryBusy ? 'SIMULATING RECOVERY…' : 'RUN SIMULATED CORRECTIVE ACTION'}
+              </button>
+            </div>
+
+            {repeatError && <p role="alert" className="rounded-md border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-200">{repeatError}</p>}
+
+            <p className="text-[11px] text-amber-200/50 font-mono">
+              Deterministic deduplication: Resending will not create a new incident. Repeat count increments from stored fingerprint.
+            </p>
+          </div>
+        )}
+        {simulationStatus.status === 'alarm_clear_observed' && <div role="status" className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-3 text-sm text-emerald-200">Synthetic recovery completed. Backend observed ALM-P02-HP clear at {simulationStatus.timestamp || 'a source timestamp'}. Open the HMI to review and confirm the outcome.</div>}
+        {simulationStatus.status === 'recovering' && <div className="text-sm text-emerald-300">Synthetic recovery readings are being generated…</div>}
+        {simulationStatus.status === 'error' && <div role="alert" className="text-sm text-red-300">The backend reported an error in the synthetic scenario. Check API logs before restarting.</div>}
         {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
       </section>
 

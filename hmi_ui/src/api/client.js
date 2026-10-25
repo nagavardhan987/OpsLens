@@ -7,11 +7,16 @@
 // In EOTE/Web Browser deployments the OpsLens UI may be hosted on a different
 // edge PC than the HMI runtime. Set VITE_API_BASE_URL to that edge host; the
 // localhost default keeps the all-in-one development setup unchanged.
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
+export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8001/api';
+export const API_ORIGIN = API_BASE.replace(/\/api\/?$/, '');
 
 export async function getSop(sopId) {
   const res = await fetch(`${API_BASE}/sops/${encodeURIComponent(sopId)}`);
-  if (!res.ok) throw new Error(`Failed to fetch SOP: ${res.statusText}`);
+  if (!res.ok) {
+    const payload = await res.json().catch(() => ({}));
+    const detail = typeof payload.detail === 'string' ? payload.detail : '';
+    throw new Error(detail || `Procedure service returned HTTP ${res.status}.`);
+  }
   return res.json();
 }
 
@@ -63,6 +68,29 @@ export async function runScenario(scenarioId, speedMultiplier = 10.0) {
   return res.json();
 }
 
+export async function getScenarioStatus() {
+  const res = await fetch(`${API_BASE}/scenarios/status`);
+  if (!res.ok) throw new Error(`Failed to fetch scenario status: ${res.statusText}`);
+  return res.json();
+}
+
+export async function applySimulatedCorrectiveAction() {
+  const res = await fetch(`${API_BASE}/scenarios/corrective-action`, { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `Simulated corrective action failed: ${res.statusText}`);
+  return data;
+}
+
+export async function triggerAlarmRepeat() {
+  const res = await fetch(`${API_BASE}/scenarios/trigger-alarm-repeat`, { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = typeof data.detail === 'string' ? data.detail : res.statusText || 'Unknown server error';
+    throw new Error(`Repeat alarm failed (HTTP ${res.status}): ${detail}`);
+  }
+  return data;
+}
+
 /**
  * Reset pipeline state in backend.
  */
@@ -92,6 +120,28 @@ export async function getOpenEvents() {
   return list.map((item) => (typeof item === 'string' ? { event_id: item } : item));
 }
 
+export async function getRecentEvents(limit = 10) {
+  const res = await fetch(`${API_BASE}/events/recent?limit=${encodeURIComponent(limit)}`);
+  if (!res.ok) throw new Error(`Failed to fetch recent alarms: ${res.statusText}`);
+  const data = await res.json();
+  return data.events || [];
+}
+
+/**
+ * Fetch active incidents ordered by deterministic urgency ranking.
+ * Returns ranked_incidents array with ranking_position and ranking_rationale.
+ */
+export async function getRankedIncidents(limit = 20) {
+  try {
+    const res = await fetch(`${API_BASE}/incidents/ranked?limit=${encodeURIComponent(limit)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Single point of truth cross-table join query for an event.
  * Returns joined CandidateEvent, CorrelatedEvent, EventStory, Evidence, SopMatch, Guidance, and OperatorActions.
@@ -103,6 +153,70 @@ export async function getFullEvent(eventId) {
     throw new Error(`Failed to fetch full event: ${res.statusText}`);
   }
   return res.json();
+}
+
+export async function askOpsLens(eventId, question, conversationId) {
+  const res = await fetch(`${API_BASE}/assistant/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ event_id: eventId, question, conversation_id: conversationId || undefined }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `Assistant request failed (${res.status})`);
+  return data;
+}
+
+export async function getImpactMetrics() {
+  const res = await fetch(`${API_BASE}/metrics/impact`);
+  if (!res.ok) throw new Error(`Failed to fetch impact metrics: ${res.statusText}`);
+  return res.json();
+}
+
+export async function getCopilotHealth() {
+  const res = await fetch(`${API_BASE}/copilot/health`);
+  if (!res.ok) throw new Error(`Failed to fetch copilot health: ${res.statusText}`);
+  return res.json();
+}
+
+function parseSseBlock(block, handlers) {
+  const lines = block.split('\n');
+  let eventName = 'message';
+  const dataLines = [];
+  for (const line of lines) {
+    if (line.startsWith('event:')) eventName = line.slice(6).trim();
+    if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+  }
+  if (!dataLines.length) return;
+  const payload = JSON.parse(dataLines.join('\n'));
+  if (eventName === 'token') handlers.onToken?.(payload.text || '');
+  else if (eventName === 'status') handlers.onStatus?.(payload);
+  else if (eventName === 'error') handlers.onError?.(payload);
+  else if (eventName === 'done') handlers.onDone?.(payload);
+}
+
+export async function askOpsLensStream({ eventId, question, conversationId, signal, onToken, onStatus, onError, onDone }) {
+  const res = await fetch(`${API_BASE}/assistant/ask/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: JSON.stringify({ event_id: eventId, question, conversation_id: conversationId || undefined }),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Assistant stream failed (${res.status})`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop() || '';
+    for (const part of parts) parseSseBlock(part, { onToken, onStatus, onError, onDone });
+  }
+  if (buffer.trim()) parseSseBlock(buffer, { onToken, onStatus, onError, onDone });
 }
 
 /**

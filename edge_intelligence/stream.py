@@ -124,7 +124,10 @@ class SQLitePollingBroker(IStreamBroker):
         queue: asyncio.Queue = asyncio.Queue()
         min_row_id = 0
         if from_latest:
-            min_row_id = await asyncio.to_thread(self._get_max_row_id)
+            # Take the cutoff before yielding control. A thread-pool hop here can
+            # let rows generated immediately after subscribe() begin be mistaken
+            # for history and silently excluded from this subscriber.
+            min_row_id = self._get_max_row_id()
 
         async with self._lock:
             self._subscribers[queue] = min_row_id
@@ -164,7 +167,11 @@ class SQLitePollingBroker(IStreamBroker):
         """
         Background loop: polls SQLite for newly inserted rows and fans out to all queues.
         """
-        last_id = await asyncio.to_thread(self._get_max_row_id)
+        # Subscriptions capture their own high-water mark when they are created.
+        # Starting from the database maximum here can skip rows inserted between
+        # subscription creation and this task's first scheduled run.
+        async with self._lock:
+            last_id = min(self._subscribers.values(), default=0)
 
         while self._running:
             try:
@@ -242,12 +249,6 @@ class TagStream:
 
         :param from_latest: If True, only readings generated after this call are delivered.
         """
-        # If from_latest is requested and broker is SQLite, determine current max row id
-        # to guarantee no old historical readings are delivered.
-        initial_max_id = 0
-        if from_latest and isinstance(self.broker, SQLitePollingBroker):
-            initial_max_id = await asyncio.to_thread(self.broker._get_max_row_id)
-
         queue = await self.broker.create_subscription(from_latest=from_latest)
 
         try:

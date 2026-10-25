@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Any, AsyncIterator
 from dataclasses import dataclass, field
 
-from models import TagReading, CandidateEvent, to_iso_utc
+from models import TagReading, CandidateEvent, IndividualAlarmRecord, to_iso_utc
 from registry_loader import RegistryLoader, get_registry_loader
 from prioritizer import PrioritizationEngine, DeviationAssessment
 from database import Database, DEFAULT_DB_PATH
@@ -29,6 +29,11 @@ class ActiveCluster:
     primary_tag: str
     primary_alarm: bool
     raw_deviation_pct: float
+    alarm_severity: Optional[str] = None
+    source_priority: Optional[str] = None
+    repeat_count: int = 1
+    lifecycle_state: str = "ACTIVE"
+    first_seen_timestamp: Optional[datetime] = None
     clustered_tags: List[str] = field(default_factory=list)
     tag_assessments: Dict[str, DeviationAssessment] = field(default_factory=dict)
 
@@ -40,7 +45,13 @@ class ActiveCluster:
             primary_alarm=self.primary_alarm,
             trigger_timestamp=to_iso_utc(self.trigger_timestamp),
             raw_deviation_pct=self.raw_deviation_pct,
-            clustered_tags=list(self.clustered_tags)
+            clustered_tags=list(self.clustered_tags),
+            alarm_severity=self.alarm_severity,
+            source_priority=self.source_priority,
+            repeat_count=self.repeat_count,
+            lifecycle_state=self.lifecycle_state,
+            first_seen_timestamp=to_iso_utc(self.first_seen_timestamp) if self.first_seen_timestamp else to_iso_utc(self.trigger_timestamp),
+            last_seen_timestamp=to_iso_utc(self.last_breach_timestamp),
         )
 
 
@@ -49,6 +60,11 @@ class DeduplicationEngine:
     Topological time-window clustering and deduplication engine.
     Suppresses alarm floods and persists CandidateEvent objects into SQLite.
     """
+
+    # Hard cap on cluster lifetime: clusters older than this are never matched
+    # against new readings, preventing stale in-memory clusters from absorbing
+    # readings that belong to a completely different incident.
+    MAX_CLUSTER_LIFETIME_SECONDS = 600.0  # 10 minutes hard cap
 
     def __init__(
         self,
@@ -72,7 +88,9 @@ class DeduplicationEngine:
             conn = self.db._get_connection()
             query = """
                 SELECT event_id, primary_tag, primary_alarm, trigger_timestamp,
-                       raw_deviation_pct, clustered_tags, equipment_id, updated_at
+                       raw_deviation_pct, clustered_tags, equipment_id, alarm_severity,
+                       updated_at, last_seen_timestamp, first_seen_timestamp,
+                       repeat_count, lifecycle_state
                 FROM candidate_events
                 WHERE status = 'OPEN'
             """
@@ -88,14 +106,79 @@ class DeduplicationEngine:
                     event_id=eid,
                     equipment_id=row["equipment_id"],
                     trigger_timestamp=trig_dt,
-                    last_breach_timestamp=trig_dt,
+                    last_breach_timestamp=self._parse_timestamp(row["last_seen_timestamp"] or row["updated_at"] or row["trigger_timestamp"]),
                     primary_tag=row["primary_tag"],
                     primary_alarm=bool(row["primary_alarm"]),
                     raw_deviation_pct=float(row["raw_deviation_pct"]),
+                    alarm_severity=row["alarm_severity"],
+                    repeat_count=int(row["repeat_count"] or 1),
+                    lifecycle_state=row["lifecycle_state"] or "ACTIVE",
                     clustered_tags=clustered,
                     tag_assessments={}
                 )
                 self._active_clusters[eid] = cluster
+
+                # Exact-repeat fingerprints are process-local, while the
+                # corresponding alarm records are persisted. Restore them so a
+                # backend restart does not reset an active alarm's repeat count.
+                from alarm_lifecycle import get_lifecycle_manager
+                lifecycle = get_lifecycle_manager()
+                for stored in self.db.get_individual_alarms(eid):
+                    if stored.get("lifecycle_state") not in ("ACTIVE", "ACKNOWLEDGED", "RECURRING"):
+                        continue
+                    fingerprint = stored.get("fingerprint")
+                    if not fingerprint:
+                        continue
+                    raw_value = stored.get("value")
+                    if raw_value in ("True", "true", "1"):
+                        value = True
+                    elif raw_value in ("False", "false", "0"):
+                        value = False
+                    else:
+                        try:
+                            value = float(raw_value)
+                        except (TypeError, ValueError):
+                            value = raw_value
+                    record = IndividualAlarmRecord(
+                        alarm_id=stored["alarm_id"],
+                        tag=stored["tag"],
+                        equipment_id=stored["equipment_id"],
+                        alarm_type=stored["alarm_type"],
+                        value=value,
+                        threshold=stored.get("threshold"),
+                        source_priority=stored.get("source_priority"),
+                        lifecycle_state=stored["lifecycle_state"],
+                        repeat_count=int(stored.get("repeat_count") or 1),
+                        first_seen_timestamp=stored["first_seen_timestamp"],
+                        last_seen_timestamp=stored["last_seen_timestamp"],
+                        cleared_timestamp=stored.get("cleared_timestamp"),
+                        acknowledged_timestamp=stored.get("acknowledged_timestamp"),
+                        fingerprint=fingerprint,
+                    )
+                    lifecycle.register_fingerprint(fingerprint, record)
+
+                # Older persisted incidents may predate individual_alarms rows.
+                # Reconstruct only the primary alarm identity from the stored
+                # candidate record; this uses the same SCADA/TRIP/ACTIVE fields
+                # the synthetic reading pipeline uses for its fingerprint.
+                if cluster.primary_alarm and cluster.primary_tag.startswith("ALM-"):
+                    from alarm_lifecycle import compute_alarm_fingerprint
+                    fingerprint = compute_alarm_fingerprint(
+                        "SCADA", cluster.equipment_id, cluster.primary_tag, "TRIP", "ACTIVE"
+                    )
+                    if lifecycle.get_record(fingerprint) is None:
+                        lifecycle.register_fingerprint(fingerprint, IndividualAlarmRecord(
+                            tag=cluster.primary_tag,
+                            equipment_id=cluster.equipment_id,
+                            alarm_type="TRIP",
+                            value=True,
+                            source_priority=cluster.source_priority or cluster.alarm_severity,
+                            lifecycle_state=cluster.lifecycle_state,
+                            repeat_count=cluster.repeat_count,
+                            first_seen_timestamp=row["first_seen_timestamp"] or row["trigger_timestamp"],
+                            last_seen_timestamp=row["last_seen_timestamp"] or row["updated_at"] or row["trigger_timestamp"],
+                            fingerprint=fingerprint,
+                        ))
         except Exception:
             pass
 
@@ -134,6 +217,11 @@ class DeduplicationEngine:
             # Check time window relative to cluster's last breach or trigger
             delta_sec = abs((breach_time - cluster.last_breach_timestamp).total_seconds())
             if delta_sec > self.cluster_window_seconds:
+                continue
+
+            # NEW: Never absorb into a cluster older than MAX_CLUSTER_LIFETIME_SECONDS
+            lifetime_sec = (breach_time - cluster.trigger_timestamp).total_seconds()
+            if lifetime_sec > self.MAX_CLUSTER_LIFETIME_SECONDS:
                 continue
 
             # Check equipment match
@@ -197,9 +285,19 @@ class DeduplicationEngine:
             cluster.primary_tag = best_tag
             cluster.primary_alarm = best_alarm
             cluster.raw_deviation_pct = cluster.tag_assessments[best_tag].deviation_pct
+            cluster.alarm_severity = cluster.tag_assessments[best_tag].reading.alarm_severity
             cluster.trigger_timestamp = self._parse_timestamp(
                 cluster.tag_assessments[best_tag].reading.timestamp
             )
+
+    def _expire_old_clusters(self, reference_time: datetime) -> None:
+        """Remove clusters older than MAX_CLUSTER_LIFETIME_SECONDS from in-memory dict."""
+        expired = [
+            eid for eid, cluster in self._active_clusters.items()
+            if (reference_time - cluster.trigger_timestamp).total_seconds() > self.MAX_CLUSTER_LIFETIME_SECONDS
+        ]
+        for eid in expired:
+            del self._active_clusters[eid]
 
     def process_reading(self, reading: TagReading) -> Optional[CandidateEvent]:
         """
@@ -214,7 +312,30 @@ class DeduplicationEngine:
             return None
 
         breach_time = self._parse_timestamp(reading.timestamp)
+        self._expire_old_clusters(breach_time)
         cluster = self._find_matching_cluster(reading.equipment_id, reading.tag, breach_time)
+
+        # Layer 1 Exact Deduplication & Layer 2 Lifecycle
+        from alarm_lifecycle import get_lifecycle_manager
+        lifecycle_mgr = get_lifecycle_manager()
+        is_dup, alarm_rec = lifecycle_mgr.check_exact_duplicate(
+            source_system="SCADA",
+            equipment_id=reading.equipment_id,
+            tag=reading.tag,
+            alarm_type="TRIP" if assessment.is_trip_alarm else "EXCURSION",
+            state_transition="ACTIVE",
+            value=reading.value,
+            threshold=assessment.entry.trip_threshold,
+            source_priority=reading.alarm_severity,
+            now=breach_time,
+        )
+
+        if cluster is None and is_dup:
+            for c in self._active_clusters.values():
+                lifetime_sec = (breach_time - c.trigger_timestamp).total_seconds()
+                if lifetime_sec <= self.MAX_CLUSTER_LIFETIME_SECONDS and c.equipment_id == reading.equipment_id:
+                    cluster = c
+                    break
 
         if cluster is not None:
             # Merge into existing cluster
@@ -223,6 +344,10 @@ class DeduplicationEngine:
 
             cluster.last_breach_timestamp = breach_time
             cluster.tag_assessments[reading.tag] = assessment
+            cluster.repeat_count = alarm_rec.repeat_count
+            cluster.lifecycle_state = alarm_rec.lifecycle_state
+            if reading.alarm_severity and not cluster.source_priority:
+                cluster.source_priority = reading.alarm_severity
             self._update_cluster_primary(cluster)
 
         else:
@@ -236,12 +361,27 @@ class DeduplicationEngine:
                 primary_tag=reading.tag,
                 primary_alarm=assessment.is_trip_alarm,
                 raw_deviation_pct=assessment.deviation_pct,
+                alarm_severity=reading.alarm_severity,
+                source_priority=reading.alarm_severity,
+                repeat_count=alarm_rec.repeat_count,
+                lifecycle_state=alarm_rec.lifecycle_state,
+                first_seen_timestamp=breach_time,
                 clustered_tags=[reading.tag],
                 tag_assessments={reading.tag: assessment}
             )
             self._active_clusters[new_id] = cluster
 
+        # Non-destructive individual alarm preservation
+        try:
+            self.db.save_individual_alarm(cluster.event_id, alarm_rec)
+        except Exception:
+            pass
+
         candidate_event = cluster.to_candidate_event()
+        try:
+            candidate_event.individual_alarms = [alarm_rec]
+        except Exception:
+            pass
 
         # Write-through to SQLite candidate_events table
         self.db.save_candidate_event(candidate_event, equipment_id=cluster.equipment_id)

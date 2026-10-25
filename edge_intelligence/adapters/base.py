@@ -3,7 +3,7 @@ OpsLens - BaseAdapter Abstract Interface
 
 All telemetry source adapters (OPC UA, MQTT, REST, Simulator) must implement
 this interface. The OpsLens Intelligence Core consumes only the common
-TagReading model — it is completely HMI and protocol agnostic.
+TagReading model â€” it is completely HMI and protocol agnostic.
 
 SAFETY: All adapters are READ-ONLY. No write operations to industrial equipment.
 """
