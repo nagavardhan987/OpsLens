@@ -76,3 +76,4 @@ edge_intelligence/qdrant_data/
 edge_intelligence/plc_tag_mapping.json
 edge_intelligence/plc_tag_mapping.local.json
 edge_intelligence/plc_certs/
+edge_intelligence/.test-tmp/
