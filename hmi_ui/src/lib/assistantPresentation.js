@@ -1,28 +1,61 @@
 export function assistantDisplayStatus(answer) {
-  const isHypothetical = answer?.uncertainty_status === 'hypothetical_reasoning' ||
-    (typeof answer?.answer === 'string' && answer.answer.toLowerCase().includes('hypothetical')) ||
-    (typeof answer?.operator_response?.bottom_line === 'string' && answer.operator_response.bottom_line.toLowerCase().includes('hypothetical'));
-
-  if (answer?.llm_used === true && answer?.fallback_used !== true) {
-    // Only name the provider when it's been genuinely used
-    const provider = answer?.used_provider || answer?.selected_provider;
-    const providerLabel = provider && provider !== 'none' && provider !== 'deterministic' ? provider : 'LLM';
-    if (isHypothetical) {
-      return { text: `Hypothetical analysis · generated via ${providerLabel}`, tone: 'ai' };
-    }
-    return { text: `AI-enhanced · grounded via ${providerLabel}`, tone: 'ai' };
+  if (answer?.fallback_used === true || answer?.llm_used !== true) {
+    return { text: 'Evidence-based answer', tone: 'evidence' };
   }
+  return { text: 'AI-generated', tone: 'ai' };
+}
 
-  if (answer?.fallback_used === true) {
-    if (isHypothetical) {
-      return { text: 'Hypothetical analysis · unobserved in stored records (deterministic fallback)', tone: 'fallback' };
-    }
-    const reason = answer?.fallback_reason;
-    const reasonLabel = (reason && reason !== 'deterministic_record_grounded') ? ` (${reason})` : '';
-    return { text: `Deterministic fallback · verified from stored data${reasonLabel}`, tone: 'fallback' };
+export function assistantFallbackExplanation(answer) {
+  const reason = String(answer?.fallback_reason || answer?.provider_metadata?.correction_failure_reason || '').toLowerCase();
+  const provider = String(answer?.selected_provider || answer?.provider_metadata?.selected_provider || '').toLowerCase();
+  if (reason === 'deterministic_record_grounded' && (!provider || ['none', 'off', 'disabled'].includes(provider))) {
+    return 'No language model is enabled; OpsLens answered from the selected incident’s verified records.';
   }
+  if (['timeout', 'connection_error', 'connect_timeout', 'read_timeout', 'unavailable', 'busy', 'rate_limit', 'auth', 'configuration', 'empty'].includes(reason)) {
+    const names = { timeout: 'timed out', connection_error: 'could not be reached', connect_timeout: 'could not be reached', read_timeout: 'timed out', unavailable: 'was unavailable', busy: 'was busy', rate_limit: 'was rate limited', auth: 'rejected authentication', configuration: 'is not configured correctly', empty: 'returned an empty response' };
+    return `The AI provider ${names[reason]}. OpsLens used evidence-based guidance from the incident record.`;
+  }
+  if (['ungrounded_numeric_value', 'ungrounded_timestamp', 'unretrieved_sop_instruction_claim', 'malformed_or_ungrounded_llm_output', 'malformed_response'].includes(reason)) {
+    return 'The AI response did not pass grounding checks against the selected incident and retrieved procedure records, so it was not shown. OpsLens used evidence-based guidance instead.';
+  }
+  if (reason) return 'The AI response could not be completed or validated for this incident. OpsLens used evidence-based guidance instead.';
+  return 'The AI response was not available for this request. OpsLens used evidence-based guidance instead.';
+}
 
-  return { text: 'Evidence-based response · verified records', tone: 'evidence' };
+export function getVerifiedSopReferences(answer) {
+  const bottomLine = String(answer?.operator_response?.bottom_line || answer?.answer || '').toLowerCase();
+  // Never show verified SOP references when the bottom line or uncertainty status reports that SOP is unavailable or not retrieved
+  if (answer?.uncertainty_status === 'insufficient_approved_procedure' && !answer?.has_approved_sop) return [];
+  if (answer?.uncertainty_status === 'not_retrieved' || answer?.uncertainty_status === 'document_content_unavailable') return [];
+
+  const isSopUnavailable = /\b(?:no|not|unavailable|not available|not retrieved|could not be found|not in the current records)\b.{0,60}\b(?:relevant\s+)?(?:sop|procedure|section)\b|\b(?:sop|procedure|section)\b.{0,60}\b(?:unavailable|not available|not retrieved|could not be found|unverified|not in the current records)\b/i.test(bottomLine);
+  if (isSopUnavailable) return [];
+
+  return (Array.isArray(answer?.sources) ? answer.sources : []).filter((source) =>
+    source?.verified === true &&
+    source?.approved === true &&
+    typeof source?.sop_id === 'string' && source.sop_id.trim() &&
+    typeof source?.section === 'string' && source.section.trim() &&
+    typeof source?.text === 'string' && source.text.trim().length >= 20
+  );
+}
+
+export function getUnverifiedSopReferences(answer) {
+  // Keep a retrieved but unapproved excerpt visible with an explicit warning,
+  // even when the bottom line correctly says no approved procedure was found.
+  return (Array.isArray(answer?.sources) ? answer.sources : []).filter((source) =>
+    source?.verified === true &&
+    source?.approved !== true &&
+    typeof source?.sop_id === 'string' && source.sop_id.trim() &&
+    typeof source?.text === 'string' && source.text.trim().length >= 20
+  );
+}
+
+export function sopDisplayStatus(resolution = {}) {
+  if (resolution.status === 'retrieval_unavailable') return 'Unavailable';
+  if (resolution.status === 'reference_unapproved') return 'Approval unverified';
+  if (resolution.status === 'reference_approved') return 'Approved';
+  return 'No approved procedure found';
 }
 
 export function formatTimestamp(value, locale) {

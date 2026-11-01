@@ -13,7 +13,10 @@ class TimeSeriesProcessor:
     def process(self, reading) -> Dict[str, Any]:
         item = {"timestamp": reading.timestamp, "tag": reading.tag, "equipment": reading.equipment_id,
                 "value": reading.value, "unit": reading.unit,
-                "alarm_state": getattr(reading, "alarm_state", None)}
+                "alarm_state": getattr(reading, "alarm_state", None),
+                "data_source": getattr(reading, "data_source", "unknown"),
+                "data_quality": getattr(reading, "data_quality", "UNKNOWN"),
+                "connection_status": getattr(reading, "connection_status", "unknown")}
         history = self._history[reading.tag]
         numeric = isinstance(reading.value, (int, float)) and not isinstance(reading.value, bool)
         prior = [float(x["value"]) for x in history if isinstance(x["value"], (int, float)) and not isinstance(x["value"], bool)]

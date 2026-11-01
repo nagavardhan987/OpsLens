@@ -7,11 +7,31 @@
 // In EOTE/Web Browser deployments the OpsLens UI may be hosted on a different
 // edge PC than the HMI runtime. Set VITE_API_BASE_URL to that edge host; the
 // localhost default keeps the all-in-one development setup unchanged.
-export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8001/api';
+export const API_BASE = import.meta.env?.VITE_API_BASE_URL || 'http://localhost:8001/api';
 export const API_ORIGIN = API_BASE.replace(/\/api\/?$/, '');
 
-export async function getSop(sopId) {
-  const res = await fetch(`${API_BASE}/sops/${encodeURIComponent(sopId)}`);
+export async function getIntegrationStatus() {
+  const response = await fetchWithTimeout(`${API_BASE}/integration/status`, {}, 5000);
+  if (!response.ok) throw new Error(`Integration status returned HTTP ${response.status}`);
+  return response.json();
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: options.signal || controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function getSop(sopId, revision = '', sha256 = '') {
+  const query = new URLSearchParams();
+  if (revision) query.set('revision', revision);
+  if (sha256) query.set('sha256', sha256);
+  const suffix = query.size ? `?${query}` : '';
+  const res = await fetch(`${API_BASE}/sops/${encodeURIComponent(sopId)}${suffix}`);
   if (!res.ok) {
     const payload = await res.json().catch(() => ({}));
     const detail = typeof payload.detail === 'string' ? payload.detail : '';
@@ -30,16 +50,37 @@ export async function ingestSopPdf(file, metadata) {
   const params = new URLSearchParams({ ...metadata, filename: file.name });
   const res = await fetch(`${API_BASE}/sops/ingest-pdf?${params}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/pdf' },
+    headers: { 'Content-Type': 'application/pdf', Prefer: 'respond-async' },
     body: file,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `PDF ingestion failed: ${res.statusText}`);
+  if (!res.ok) {
+    const detail = data.detail;
+    const error = new Error(typeof detail === 'string' ? detail : detail?.message || `PDF ingestion failed: HTTP ${res.status}`);
+    error.stage = typeof detail === 'object' ? detail.stage : undefined;
+    error.manualReviewRequired = typeof detail === 'object' ? detail.manual_review_required : false;
+    error.status = res.status;
+    throw error;
+  }
   return data;
 }
 
-export function getSopSourceUrl(sopId) {
-  return `${API_BASE}/sops/${encodeURIComponent(sopId)}/source`;
+export async function getSopIngestionJob(jobId) {
+  const res = await fetch(`${API_BASE}/sops/ingestion-jobs/${encodeURIComponent(jobId)}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data.detail;
+    throw new Error(typeof detail === 'string' ? detail : detail?.message || `Ingestion status unavailable: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export function getSopSourceUrl(sopId, revision = '', sha256 = '') {
+  const query = new URLSearchParams();
+  if (revision) query.set('revision', revision);
+  if (sha256) query.set('sha256', sha256);
+  const suffix = query.size ? `?${query}` : '';
+  return `${API_BASE}/sops/${encodeURIComponent(sopId)}/source${suffix}`;
 }
 
 /**
@@ -113,7 +154,7 @@ export async function getSystemStatus() {
  * Query open (unresolved) event IDs.
  */
 export async function getOpenEvents() {
-  const res = await fetch(`${API_BASE}/events/open`);
+  const res = await fetchWithTimeout(`${API_BASE}/events/open`);
   if (!res.ok) throw new Error(`Failed to fetch open events: ${res.statusText}`);
   const data = await res.json();
   const list = Array.isArray(data) ? data : (data.open_events || []);
@@ -121,7 +162,7 @@ export async function getOpenEvents() {
 }
 
 export async function getRecentEvents(limit = 10) {
-  const res = await fetch(`${API_BASE}/events/recent?limit=${encodeURIComponent(limit)}`);
+  const res = await fetchWithTimeout(`${API_BASE}/events/recent?limit=${encodeURIComponent(limit)}`);
   if (!res.ok) throw new Error(`Failed to fetch recent alarms: ${res.statusText}`);
   const data = await res.json();
   return data.events || [];
@@ -133,7 +174,7 @@ export async function getRecentEvents(limit = 10) {
  */
 export async function getRankedIncidents(limit = 20) {
   try {
-    const res = await fetch(`${API_BASE}/incidents/ranked?limit=${encodeURIComponent(limit)}`);
+    const res = await fetchWithTimeout(`${API_BASE}/incidents/ranked?limit=${encodeURIComponent(limit)}`);
     if (!res.ok) return null;
     const data = await res.json();
     return data;
@@ -147,7 +188,7 @@ export async function getRankedIncidents(limit = 20) {
  * Returns joined CandidateEvent, CorrelatedEvent, EventStory, Evidence, SopMatch, Guidance, and OperatorActions.
  */
 export async function getFullEvent(eventId) {
-  const res = await fetch(`${API_BASE}/events/${eventId}`);
+  const res = await fetchWithTimeout(`${API_BASE}/events/${eventId}`);
   if (!res.ok) {
     if (res.status === 404) return null;
     throw new Error(`Failed to fetch full event: ${res.statusText}`);
@@ -162,12 +203,22 @@ export async function askOpsLens(eventId, question, conversationId) {
     body: JSON.stringify({ event_id: eventId, question, conversation_id: conversationId || undefined }),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `Assistant request failed (${res.status})`);
+  if (!res.ok) {
+    const detail = typeof data.detail === 'string' ? data.detail : `Assistant request failed (${res.status})`;
+    const requestId = res.headers.get('X-Request-ID');
+    throw new Error(requestId ? `${detail} (Request ID: ${requestId})` : detail);
+  }
   return data;
 }
 
-export async function getImpactMetrics() {
-  const res = await fetch(`${API_BASE}/metrics/impact`);
+export async function getImpactMetrics(params = {}) {
+  const query = new URLSearchParams();
+  if (params.scope) query.set('scope', params.scope);
+  if (params.eventId) query.set('event_id', params.eventId);
+  if (params.baselineMttr) query.set('baseline_mttr', params.baselineMttr);
+  const qs = query.toString();
+  const url = `${API_BASE}/metrics/impact${qs ? `?${qs}` : ''}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch impact metrics: ${res.statusText}`);
   return res.json();
 }
@@ -203,20 +254,31 @@ export async function askOpsLensStream({ eventId, question, conversationId, sign
   });
   if (!res.ok || !res.body) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || `Assistant stream failed (${res.status})`);
+    const detail = typeof data.detail === 'string' ? data.detail : `Assistant stream failed (${res.status})`;
+    const requestId = res.headers.get('X-Request-ID');
+    throw new Error(requestId ? `${detail} (Request ID: ${requestId})` : detail);
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let streamFailure = false;
+  const handlers = {
+    onToken, onStatus, onDone,
+    onError: (payload) => { streamFailure = true; onError?.(payload); },
+  };
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const parts = buffer.split('\n\n');
     buffer = parts.pop() || '';
-    for (const part of parts) parseSseBlock(part, { onToken, onStatus, onError, onDone });
+    for (const part of parts) parseSseBlock(part, handlers);
   }
-  if (buffer.trim()) parseSseBlock(buffer, { onToken, onStatus, onError, onDone });
+  if (buffer.trim()) parseSseBlock(buffer, handlers);
+  // A streamed error event does not reject fetch by itself. Reject here so the
+  // drawer can retry the deterministic JSON endpoint, which may still provide
+  // a grounded answer when only the stream/provider path failed.
+  if (streamFailure) throw new Error('Assistant stream failed; retrying with the incident evidence endpoint.');
 }
 
 /**
@@ -241,8 +303,24 @@ export async function logOperatorAction(params) {
     }),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Action rejected: ${res.statusText}`);
+    const error = new Error('Operator action request failed.');
+    error.status = res.status;
+    throw error;
+  }
+  return res.json();
+}
+
+/** Mark an incident unresolved through the dedicated status-transition endpoint. */
+export async function markIncidentUnresolved({ eventId, operator, reason = null, timestamp = new Date().toISOString() }) {
+  const res = await fetch(`${API_BASE}/incidents/${encodeURIComponent(eventId)}/unresolved`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ operator, reason, timestamp }),
+  });
+  if (!res.ok) {
+    const error = new Error('Incident status request failed.');
+    error.status = res.status;
+    throw error;
   }
   return res.json();
 }

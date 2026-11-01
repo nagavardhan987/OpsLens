@@ -1,5 +1,6 @@
 """Build a timestamp-faithful, incident-scoped 30-minute context from SQLite."""
 from datetime import datetime, timedelta, timezone
+import os
 from time import perf_counter
 from typing import Any, Callable, Dict, List, Optional
 
@@ -51,6 +52,11 @@ class ContextBuilder:
         self.db = db
         self.event_loader = event_loader
         self.knowledge_graph = knowledge_graph
+        try:
+            minutes = int(os.environ.get("OPSLENS_ASSISTANT_CONTEXT_WINDOW_MINUTES", "30"))
+        except ValueError:
+            minutes = 30
+        self.window = timedelta(minutes=max(1, min(minutes, 24 * 60)))
 
     def build(
         self,
@@ -89,7 +95,7 @@ class ContextBuilder:
                 "The event has no recorded timestamp; provide reference_timestamp to build context."
             )
         reference = parse_timestamp(reference_value)
-        start = reference - self.WINDOW
+        start = reference - self.window
         start_iso, end_iso = to_iso_utc(start), to_iso_utc(reference)
 
         primary_tag = candidate.get("primary_tag") or event.get("primary_tag") or ""
@@ -104,6 +110,7 @@ class ContextBuilder:
         if primary_tag and (primary_tag not in TAG_REGISTRY or TAG_REGISTRY[primary_tag].equipment_id == equipment):
             relevant_tags.add(primary_tag)
 
+        database_started = perf_counter()
         raw_readings = self.db.get_context_readings(
             equipment_id=equipment,
             tags=sorted(relevant_tags),
@@ -135,6 +142,10 @@ class ContextBuilder:
                 tag=item["tag"], value=item["value"], unit=item.get("unit", ""),
                 equipment_id=item.get("equipment_id", equipment),
                 timestamp=item["timestamp"], timestamp_utc=to_iso_utc(timestamp),
+                received_timestamp=item.get("received_timestamp"),
+                data_quality=item.get("data_quality", "UNKNOWN"),
+                data_source=item.get("data_source", "unknown"),
+                connection_status=item.get("connection_status", "unknown"),
             ), int(item.get("record_id") or 0)))
         readings.sort(key=lambda pair: (pair[0], pair[1].tag, pair[2]))
         reading_models = [item[1] for item in readings]
@@ -165,6 +176,7 @@ class ContextBuilder:
 
         event_ids = [event_id, *(item.event_id for item in related_models)]
         raw_actions = self.db.get_context_actions(event_ids, start_iso, end_iso)
+        database_retrieval_ms = round((perf_counter() - database_started) * 1000, 3)
         actions: List[tuple[datetime, ContextOperatorAction]] = []
         seen_actions = set()
         for item in raw_actions:
@@ -201,6 +213,9 @@ class ContextBuilder:
                 "section": payload.get("section"),
                 "page": payload.get("page"),
                 "chunk_id": payload.get("chunk_id") or chunk.get("chunk_id"),
+                "approval_status": payload.get("approval_status", "unverified"),
+                "document_status": payload.get("document_status", "Approval status not verified"),
+                "approved": payload.get("approved") is True,
                 "similarity_score": chunk.get("similarity_score", chunk.get("similarity")),
                 "text": chunk.get("text") or payload.get("text"),
                 "retrieval_method": sop_match.get("retrieval_method"),
@@ -232,7 +247,9 @@ class ContextBuilder:
                 "tag": alarm_reading.tag,
                 "value": alarm_reading.value,
                 "timestamp": alarm_reading.timestamp,
-                "source": alarm_reading.source,
+                # TagReading intentionally carries process facts only. Its
+                # persisted provenance is the query/store, not a model field.
+                "source": "sqlite.tag_readings",
             } if alarm_reading else None),
             "recorded_fact_source": "SQLite candidate/event records",
         }
@@ -246,7 +263,10 @@ class ContextBuilder:
         if not steps:
             missing_data.append("No event story was stored for this incident.")
         if not sop_references:
-            missing_data.append("No retrieved SOP chunks are attached to this incident.")
+            if sop_match.get("retrieval_status") == "unavailable":
+                missing_data.append("SOP retrieval was unavailable; no approved procedure passage could be checked.")
+            else:
+                missing_data.append("No applicable approved SOP passage was retrieved for this incident.")
         if selected_event["timestamp_discrepancy"]:
             missing_data.append(
                 "The candidate event trigger timestamp and event-story alarm-step timestamp differ; "
@@ -280,6 +300,7 @@ class ContextBuilder:
                     "title": sop_match.get("sop_title") or sop_match.get("title"),
                     "revision": sop_match.get("revision"),
                     "retrieval_method": sop_match.get("retrieval_method"),
+                    "retrieval_status": sop_match.get("retrieval_status", "no_match"),
                     "similarity_score": sop_match.get("semantic_similarity"),
                     "references": sop_references,
                 } if sop_match else None,
@@ -297,6 +318,7 @@ class ContextBuilder:
             hypotheses=hypotheses,
             duplicate_readings_removed=duplicates_removed,
             assembly_latency_ms=0.0,
+            timings_ms={"database_retrieval": database_retrieval_ms},
         )
         result.assembly_latency_ms = round((perf_counter() - started) * 1000, 3)
         return result

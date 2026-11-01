@@ -38,9 +38,24 @@ async def lifespan(app: FastAPI):
     # and reruns the full event pipeline; subscribe only to rows added after
     # this process starts.
     await orch.start_streaming(from_latest=True)
+    plc_adapter = app.state.opcua_adapter
+    plc_task = None
+    if plc_adapter.config.enabled and plc_adapter.configured:
+        async def ingest_plc_readings():
+            async for reading in plc_adapter.stream_readings():
+                # PLC readings enter the same write-through store and incident pipeline.
+                orch.db.insert_reading(reading)
+        plc_task = asyncio.create_task(ingest_plc_readings(), name="opslens-plc-opcua-ingestion")
     try:
         yield
     finally:
+        if plc_task and not plc_task.done():
+            plc_task.cancel()
+            try:
+                await plc_task
+            except asyncio.CancelledError:
+                pass
+        await plc_adapter.disconnect()
         await orch.stop()
 
 

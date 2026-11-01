@@ -20,15 +20,20 @@ from tag_registry import (
 class TestTagRegistry(unittest.TestCase):
 
     def test_registry_size_and_units(self):
-        """Requirement 1: 8-12 tags across at least 2-3 equipment units."""
+        """Retain the original tags and include wastewater process instrumentation."""
         tags = get_all_tags()
-        self.assertTrue(8 <= len(tags) <= 12, f"Expected 8-12 tags, found {len(tags)}")
+        self.assertGreaterEqual(len(tags), 23, f"Expected original plus wastewater tags, found {len(tags)}")
 
         equipment_ids = get_all_equipment_ids()
         self.assertTrue(len(equipment_ids) >= 2, f"Expected at least 2-3 equipment units, found {len(equipment_ids)}")
         self.assertIn("Pump-02", equipment_ids)
         self.assertIn("Compressor-01", equipment_ids)
         self.assertIn("Tank-01", equipment_ids)
+        self.assertIn("LiftStation-01", equipment_ids)
+        self.assertIn("InletWorks-01", equipment_ids)
+        self.assertIn("AerationBasin-01", equipment_ids)
+        self.assertEqual(get_tag_entry("FIT-101-DIS").unit, "m³/h")
+        self.assertEqual(get_tag_entry("AIT-201-DO").unit, "mg/L")
 
     def test_tag_schema_compliance(self):
         """All entries must strictly match TagRegistryEntry schema."""

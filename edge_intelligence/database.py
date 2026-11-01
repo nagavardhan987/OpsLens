@@ -56,9 +56,22 @@ class Database:
                     value_raw TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     unit TEXT NOT NULL,
-                    equipment_id TEXT NOT NULL
+                    equipment_id TEXT NOT NULL,
+                    received_timestamp TEXT,
+                    data_quality TEXT DEFAULT 'UNKNOWN',
+                    data_source TEXT DEFAULT 'unknown',
+                    connection_status TEXT DEFAULT 'unknown'
                 );
             """)
+            reading_columns = {row[1] for row in conn.execute("PRAGMA table_info(tag_readings)")}
+            for column, column_type in {
+                "received_timestamp": "TEXT",
+                "data_quality": "TEXT DEFAULT 'UNKNOWN'",
+                "data_source": "TEXT DEFAULT 'unknown'",
+                "connection_status": "TEXT DEFAULT 'unknown'",
+            }.items():
+                if column not in reading_columns:
+                    conn.execute(f"ALTER TABLE tag_readings ADD COLUMN {column} {column_type}")
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_tag_readings_tag_ts
                 ON tag_readings(tag, timestamp);
@@ -70,6 +83,10 @@ class Database:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_tag_readings_equip
                 ON tag_readings(equipment_id, timestamp);
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tag_readings_equip_tag_ts
+                ON tag_readings(equipment_id, tag, timestamp);
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS candidate_events (
@@ -207,9 +224,17 @@ class Database:
                 ("why_retrieved", "TEXT"),
                 ("retrieved_chunks", "TEXT"),
                 ("rag_trace", "TEXT"),
+                ("retrieval_status", "TEXT DEFAULT 'match_found'"),
+                ("retrieval_error", "TEXT"),
             ):
                 if column not in sop_columns:
                     conn.execute(f"ALTER TABLE sop_matches ADD COLUMN {column} {sql_type}")
+            conn.execute("""
+                UPDATE sop_matches SET retrieval_status = 'no_match'
+                WHERE sop_id IN ('NONE', 'SOP-NONE', 'UNKNOWN-SOP')
+                  AND COALESCE(retrieved_chunks, '[]') = '[]'
+                  AND retrieval_status = 'match_found'
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS guidance (
                     event_id TEXT PRIMARY KEY,
@@ -243,6 +268,10 @@ class Database:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_operator_actions_ts
                 ON operator_actions(timestamp);
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operator_actions_event_ts
+                ON operator_actions(event_id, timestamp);
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS assistant_messages (
@@ -280,8 +309,9 @@ class Database:
         with conn:
             cursor = conn.execute(
                 """
-                INSERT INTO tag_readings (tag, value, value_raw, timestamp, unit, equipment_id)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO tag_readings (tag, value, value_raw, timestamp, unit, equipment_id,
+                    received_timestamp, data_quality, data_source, connection_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     reading.tag,
@@ -290,6 +320,10 @@ class Database:
                     reading.timestamp,
                     reading.unit,
                     reading.equipment_id,
+                    reading.received_timestamp,
+                    reading.data_quality,
+                    reading.data_source,
+                    reading.connection_status,
                 )
             )
             return cursor.lastrowid
@@ -310,13 +344,15 @@ class Database:
             else:
                 num_val = None
                 raw_val = str(r.value)
-            rows.append((r.tag, num_val, raw_val, r.timestamp, r.unit, r.equipment_id))
+            rows.append((r.tag, num_val, raw_val, r.timestamp, r.unit, r.equipment_id,
+                         r.received_timestamp, r.data_quality, r.data_source, r.connection_status))
 
         with conn:
             conn.executemany(
                 """
-                INSERT INTO tag_readings (tag, value, value_raw, timestamp, unit, equipment_id)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO tag_readings (tag, value, value_raw, timestamp, unit, equipment_id,
+                    received_timestamp, data_quality, data_source, connection_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows
             )
@@ -353,7 +389,8 @@ class Database:
         limit_sql = f"LIMIT {int(limit)}" if limit else ""
 
         query = f"""
-            SELECT tag, value, value_raw, timestamp, unit, equipment_id
+            SELECT tag, value, value_raw, timestamp, unit, equipment_id,
+                   received_timestamp, data_quality, data_source, connection_status
             FROM tag_readings
             {where_sql}
             ORDER BY timestamp {order_dir}, id {order_dir}
@@ -380,7 +417,11 @@ class Database:
                     value=typed_val,
                     timestamp=row["timestamp"],
                     unit=row["unit"],
-                    equipment_id=row["equipment_id"]
+                    equipment_id=row["equipment_id"],
+                    received_timestamp=row["received_timestamp"] or row["timestamp"],
+                    data_quality=row["data_quality"] or "UNKNOWN",
+                    data_source=row["data_source"] or "unknown",
+                    connection_status=row["connection_status"] or "unknown",
                 )
             )
         return readings
@@ -408,7 +449,8 @@ class Database:
         lower, upper = self._context_query_bounds(start_time, end_time)
         placeholders = ",".join("?" for _ in tags)
         rows = self._get_connection().execute(
-            f"""SELECT id, tag, value, value_raw, timestamp, unit, equipment_id
+            f"""SELECT id, tag, value, value_raw, timestamp, unit, equipment_id,
+                       received_timestamp, data_quality, data_source, connection_status
                 FROM tag_readings
                 WHERE equipment_id = ? AND tag IN ({placeholders})
                   AND timestamp >= ? AND timestamp <= ?
@@ -428,7 +470,11 @@ class Database:
                 value = raw
             results.append({"record_id": row["id"], "tag": row["tag"], "value": value,
                             "timestamp": row["timestamp"], "unit": row["unit"],
-                            "equipment_id": row["equipment_id"]})
+                            "equipment_id": row["equipment_id"],
+                            "received_timestamp": row["received_timestamp"] or row["timestamp"],
+                            "data_quality": row["data_quality"] or "UNKNOWN",
+                            "data_source": row["data_source"] or "unknown",
+                            "connection_status": row["connection_status"] or "unknown"})
         return results
 
     def get_context_events(self, equipment_id: str, start_time: str, end_time: str,
@@ -444,11 +490,15 @@ class Database:
             f"""SELECT ce.event_id, ce.primary_tag, ce.primary_alarm,
                        ce.trigger_timestamp, ce.raw_deviation_pct, ce.clustered_tags,
                        ce.equipment_id, ce.alarm_severity,
-                       CASE
-                         WHEN EXISTS (SELECT 1 FROM operator_actions oa WHERE oa.event_id = ce.event_id
-                           AND UPPER(oa.action_type) IN ('RESOLVE', 'RESOLVED')) THEN 'RESOLVED'
-                         WHEN EXISTS (SELECT 1 FROM operator_actions oa WHERE oa.event_id = ce.event_id
-                           AND UPPER(oa.action_type) IN ('ACKNOWLEDGE', 'ACKNOWLEDGED')) THEN 'ACKNOWLEDGED'
+                       CASE (SELECT UPPER(oa.action_type) FROM operator_actions oa
+                             WHERE oa.event_id = ce.event_id
+                               AND UPPER(oa.action_type) IN ('RESOLVE', 'RESOLVED', 'ACKNOWLEDGE', 'ACKNOWLEDGED', 'MARK_UNRESOLVED')
+                             ORDER BY julianday(oa.timestamp) DESC, oa.timestamp DESC, oa.created_at DESC, oa.rowid DESC LIMIT 1)
+                         WHEN 'RESOLVE' THEN 'RESOLVED'
+                         WHEN 'RESOLVED' THEN 'RESOLVED'
+                         WHEN 'ACKNOWLEDGE' THEN 'ACKNOWLEDGED'
+                         WHEN 'ACKNOWLEDGED' THEN 'ACKNOWLEDGED'
+                         WHEN 'MARK_UNRESOLVED' THEN 'UNRESOLVED'
                          ELSE 'OPEN'
                        END AS status
                 FROM candidate_events ce WHERE {' OR '.join(clauses)}
@@ -480,9 +530,35 @@ class Database:
                  "timestamp": row["timestamp"], "notes": row["notes"]} for row in rows]
 
     def get_latest_reading(self, tag: str) -> Optional[TagReading]:
-        """Fetch latest reading for a specific tag."""
-        res = self.get_readings(tag=tag, limit=1, order_desc=True)
-        return res[0] if res else None
+        """Fetch the chronologically latest reading, including ISO timezone offsets."""
+        conn = self._get_connection()
+        row = conn.execute(
+            """SELECT tag, value, value_raw, timestamp, unit, equipment_id,
+                      received_timestamp, data_quality, data_source, connection_status
+               FROM tag_readings WHERE tag = ?
+               ORDER BY julianday(timestamp) DESC, timestamp DESC, id DESC LIMIT 1""",
+            (tag,),
+        ).fetchone()
+        if row is None:
+            return None
+        raw = row["value_raw"]
+        if raw == "true":
+            typed_value: Union[float, bool, str] = True
+        elif raw == "false":
+            typed_value = False
+        else:
+            try:
+                typed_value = float(raw)
+            except (TypeError, ValueError):
+                typed_value = raw
+        return TagReading(
+            tag=row["tag"], value=typed_value, timestamp=row["timestamp"],
+            unit=row["unit"], equipment_id=row["equipment_id"],
+            received_timestamp=row["received_timestamp"] or row["timestamp"],
+            data_quality=row["data_quality"] or "UNKNOWN",
+            data_source=row["data_source"] or "unknown",
+            connection_status=row["connection_status"] or "unknown",
+        )
 
     def get_count(self, tag: Optional[str] = None) -> int:
         """Get total rows in tag_readings table."""
@@ -1003,8 +1079,8 @@ class Database:
                     event_id, sop_id, sop_title, match_score, steps, source, created_at,
                     revision, semantic_similarity, retrieval_method, embedding_model,
                     query_context, why_retrieved, retrieved_chunks
-                    , rag_trace
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , rag_trace, retrieval_status, retrieval_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(event_id) DO UPDATE SET
                     sop_id = excluded.sop_id,
                     sop_title = excluded.sop_title,
@@ -1019,7 +1095,9 @@ class Database:
                     query_context = excluded.query_context,
                     why_retrieved = excluded.why_retrieved,
                     retrieved_chunks = excluded.retrieved_chunks,
-                    rag_trace = excluded.rag_trace
+                    rag_trace = excluded.rag_trace,
+                    retrieval_status = excluded.retrieval_status,
+                    retrieval_error = excluded.retrieval_error
                 """,
                 (
                     match.event_id,
@@ -1037,6 +1115,8 @@ class Database:
                     json.dumps(match.why_retrieved or {}),
                     json.dumps(match.retrieved_chunks or []),
                     json.dumps(match.rag_trace or {}),
+                    match.retrieval_status,
+                    match.retrieval_error,
                 )
             )
 
@@ -1053,7 +1133,8 @@ class Database:
         query = f"""
             SELECT event_id, sop_id, sop_title, match_score, steps, source, created_at,
                    revision, semantic_similarity, retrieval_method, embedding_model,
-                   query_context, why_retrieved, retrieved_chunks, rag_trace
+                   query_context, why_retrieved, retrieved_chunks, rag_trace,
+                   retrieval_status, retrieval_error
             FROM sop_matches
             {where_sql}
             ORDER BY created_at ASC
@@ -1079,6 +1160,8 @@ class Database:
                     retrieved_chunks=json.loads(row["retrieved_chunks"] or "[]"),
                     chunks=json.loads(row["retrieved_chunks"] or "[]"),
                     rag_trace=json.loads(row["rag_trace"] or "{}"),
+                    retrieval_status=row["retrieval_status"] or "match_found",
+                    retrieval_error=row["retrieval_error"],
                 )
             )
         return results
@@ -1221,20 +1304,45 @@ class Database:
             )
         return results
 
+    def get_event_status(self, event_id: str) -> str:
+        """Return incident lifecycle status from its latest audited transition."""
+        row = self._get_connection().execute(
+            """
+            SELECT UPPER(action_type) AS action_type
+            FROM operator_actions
+            WHERE event_id = ?
+              AND UPPER(action_type) IN ('RESOLVE', 'RESOLVED', 'ACKNOWLEDGE', 'ACKNOWLEDGED', 'MARK_UNRESOLVED')
+            ORDER BY julianday(timestamp) DESC, timestamp DESC, created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (event_id,),
+        ).fetchone()
+        action_type = row["action_type"] if row else None
+        return {
+            "RESOLVE": "RESOLVED",
+            "RESOLVED": "RESOLVED",
+            "ACKNOWLEDGE": "ACKNOWLEDGED",
+            "ACKNOWLEDGED": "ACKNOWLEDGED",
+            "MARK_UNRESOLVED": "UNRESOLVED",
+        }.get(action_type, "OPEN")
+
     def get_open_event_ids(self) -> List[str]:
         """
-        Fetch list of event_ids from event_stories that have no action
-        of type RESOLVED or ACKNOWLEDGED (or RESOLVE / ACKNOWLEDGE).
+        Fetch event_ids whose latest audited lifecycle transition is not
+        RESOLVE or ACKNOWLEDGE. MARK_UNRESOLVED explicitly reopens the event.
         """
         conn = self._get_connection()
         query = """
             SELECT event_id
             FROM event_stories
-            WHERE event_id NOT IN (
-                SELECT DISTINCT event_id
-                FROM operator_actions
-                WHERE UPPER(action_type) IN ('RESOLVED', 'RESOLVE', 'ACKNOWLEDGED', 'ACKNOWLEDGE')
-            )
+            WHERE COALESCE((
+                SELECT UPPER(oa.action_type)
+                FROM operator_actions oa
+                WHERE oa.event_id = event_stories.event_id
+                  AND UPPER(oa.action_type) IN ('RESOLVED', 'RESOLVE', 'ACKNOWLEDGED', 'ACKNOWLEDGE', 'MARK_UNRESOLVED')
+                ORDER BY julianday(oa.timestamp) DESC, oa.timestamp DESC, oa.created_at DESC, oa.rowid DESC
+                LIMIT 1
+            ), '') NOT IN ('RESOLVED', 'RESOLVE', 'ACKNOWLEDGED', 'ACKNOWLEDGE')
             ORDER BY created_at ASC
         """
         cursor = conn.execute(query)
@@ -1307,15 +1415,7 @@ class Database:
         """
         Check whether an event has been resolved by an action of type RESOLVE or RESOLVED.
         """
-        conn = self._get_connection()
-        query = """
-            SELECT 1
-            FROM operator_actions
-            WHERE event_id = ? AND UPPER(action_type) IN ('RESOLVE', 'RESOLVED')
-            LIMIT 1
-        """
-        cursor = conn.execute(query, (event_id,))
-        return cursor.fetchone() is not None
+        return self.get_event_status(event_id) == "RESOLVED"
 
     def get_conversation_event_id(self, conversation_id: str) -> Optional[str]:
         conn = self._get_connection()

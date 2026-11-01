@@ -1,10 +1,14 @@
 {
   "sop_id": "SOP-P02-SEAL-01",
-  "approved": true,
-  "document_status": "APPROVED PROCEDURE — EcoStruxure Asset Advisor Verified",
+  "approved": false,
+  "document_status": "Locally authored demonstration procedure; operational approval status not verified.",
   "title": "Pump-02 Mechanical Seal Leak & Low Flow Isolation",
   "equipment_id": "Pump-02",
-  "tags": ["FIT-02-FLW", "PIT-02-PRS", "TNK-01-LVL"],
+  "tags": [
+    "FIT-02-FLW",
+    "PIT-02-PRS",
+    "TNK-01-LVL"
+  ],
   "keywords": [
     "seal leak",
     "flow reduction",
@@ -27,5 +31,7 @@
     "Throttle discharge isolation valve to prevent reverse flow and isolate auxiliary flush lines.",
     "Switch service to standby auxiliary feed pump Pump-01 if running.",
     "Depressurize Pump-02 fluid end and lock out pump motor for mechanical seal replacement."
-  ]
+  ],
+  "approval_status": "unverified",
+  "approval_reference": null
 }

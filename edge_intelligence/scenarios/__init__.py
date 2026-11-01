@@ -11,9 +11,19 @@ from scenarios.sensor_fault import SensorFaultScenario
 from scenarios.tank_overflow import TankOverflowScenario
 from scenarios.compressor_overspeed import CompressorOverspeedScenario
 from scenarios.pump_cavitation import PumpCavitationScenario
+from scenarios.wet_well_high_level import WetWellHighLevelScenario
+from scenarios.screen_differential_pressure import ScreenDifferentialPressureScenario
+from scenarios.low_do_ammonia_rise import LowDOAmmoniaRiseScenario
+from scenarios.filters_uv_disinfection_failure import FiltersUvDisinfectionFailureScenario
 
 
 SCENARIO_REGISTRY: Dict[str, Type[BaseScenario]] = {
+    # Wastewater scenarios appear first so the primary demo is in its intended domain.
+    "wet_well_high_level": WetWellHighLevelScenario,
+    "screen_differential_pressure": ScreenDifferentialPressureScenario,
+    "low_do_ammonia_rise": LowDOAmmoniaRiseScenario,
+    "filters_uv_disinfection_failure": FiltersUvDisinfectionFailureScenario,
+
     # --- Original 4 ---
     "valve_restriction":         ValveRestrictionScenario,
     "valve_restriction_cascade": ValveRestrictionScenario,

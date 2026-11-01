@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -22,6 +23,7 @@ from tag_registry import TAG_REGISTRY
 from trend_analysis import summarize_readings
 
 logger = logging.getLogger("opslens.assistant")
+_CORRECTION_LOCKS = tuple(threading.Lock() for _ in range(64))
 
 # Tests may inject a complete(prompt) -> str callable.
 _llm_complete_override: Optional[Callable[[str], str]] = None
@@ -76,6 +78,20 @@ def _trend_sentence(trend: Dict[str, Any]) -> str:
     return result
 
 
+def _concise_trend_change(trend: Dict[str, Any]) -> Optional[str]:
+    """Format only a trend's first and last recorded values for an operator question."""
+    first, last = trend.get("first_observed"), trend.get("last_observed")
+    if not isinstance(first, dict) or not isinstance(last, dict):
+        return None
+    before, after = first.get("value"), last.get("value")
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (before, after)):
+        return None
+    delta = trend.get("absolute_change")
+    direction = "increased" if isinstance(delta, (int, float)) and delta > 0 else "decreased" if isinstance(delta, (int, float)) and delta < 0 else "changed"
+    unit = str(trend.get("unit") or "")
+    return f"{trend.get('tag')} {direction} from {_format_value_unit(before, unit)} to {_format_value_unit(after, unit)}"
+
+
 def _operator_friendly_note(value: str) -> str:
     """Remove internal column labels and render any stored ISO times readably."""
     def readable(match: re.Match[str]) -> str:
@@ -126,7 +142,16 @@ def _operator_response(event: Dict[str, Any], response: Dict[str, Any]) -> Dict[
     elif unc == "insufficient_historical_readings":
         bottom_line = "No usable numeric historical readings were recorded for the relevant tags in this context window, so a trend cannot be calculated."
     elif unc == "insufficient_approved_procedure":
-        bottom_line = "Sufficient approved procedure guidance was not retrieved for this incident."
+        resolution = response.get("sop_resolution") or {}
+        if resolution.get("status") == "reference_unapproved":
+            bottom_line = (
+                f"A relevant passage from {resolution.get('sop_id') or 'the retrieved procedure'} was found for {equipment}, "
+                "but it is reference-only because approval is not verified. The source text is shown separately and is not authorized guidance."
+            )
+        elif resolution.get("status") == "document_content_unavailable":
+            bottom_line = "The matched SOP document exists, but no matching step content was available in the retrieved records."
+        else:
+            bottom_line = "No relevant SOP step content was retrieved for this incident."
     elif unc == "recorded_similar_incidents":
         bottom_line = "Similar recorded incidents were found in the available equipment/tag history; this does not prove a repeated physical cause."
     elif unc == "incomplete_or_empty_day_history":
@@ -244,8 +269,11 @@ def _operator_response(event: Dict[str, Any], response: Dict[str, Any]) -> Dict[
         else:
             # Do not copy internal source field names into the operator view.
             limitations.append(_operator_friendly_note(text))
-    if response.get("uncertainty_status") == "insufficient_approved_procedure":
-        limitations.append("Sufficient approved procedure guidance was not retrieved; SOP approval status is not verified.")
+    resolution = response.get("sop_resolution") or {}
+    if resolution.get("status") == "reference_unapproved":
+        limitations.append("A matching SOP passage was retrieved, but its approval status is not verified; it is not approved guidance.")
+    elif resolution.get("status") in ("retrieval_unavailable", "document_content_unavailable", "document_not_found", "not_retrieved"):
+        limitations.append(resolution.get("message") or "No applicable approved SOP passage was retrieved.")
     limitations = list(dict.fromkeys(limitations))
 
     result = {
@@ -254,9 +282,408 @@ def _operator_response(event: Dict[str, Any], response: Dict[str, Any]) -> Dict[
         "interpretation": interpretation,
         "recommended_checks": checks[:3],
         "data_limitations": limitations,
+        "relevant_sop": _operator_sop_reference(response),
+        "resolution_criteria": _approved_resolution_criteria(response),
         "read_only": True,
     }
     return result
+
+
+def _structured_assessment(
+    event: Dict[str, Any], facts: Dict[str, Any], operator_response: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Create scenario-grounded Problem/Cause/Solution fields from stored facts."""
+    candidate = event.get("candidate") or {}
+    correlated = event.get("correlated") or {}
+    evidence_record = event.get("evidence") or {}
+    incident_context = facts.get("incident_context") or {}
+    context = facts.get("context") or {}
+    story = event.get("story") or {}
+    alarm_tag = (incident_context.get("alarm_id") or candidate.get("primary_tag")
+                 or event.get("primary_tag") or "Alarm not recorded")
+    equipment = incident_context.get("equipment") or correlated.get("equipment_id") or "Equipment not recorded"
+    state = incident_context.get("alarm_state") or {}
+    active = state.get("active") if isinstance(state, dict) else None
+    state_text = "recorded active" if active is True else "recorded clear" if active is False else "state unavailable"
+    story_label = str(story.get("causal_label") or "").strip()
+    problem_summary = f"Alarm {alarm_tag} was recorded for {equipment}; its latest recorded state is {state_text}."
+    if story_label:
+        problem_summary += f" The event story is labeled ‘{story_label}’; that label does not confirm a physical cause."
+
+    observations = list(operator_response.get("evidence") or [])
+    readings_by_tag: Dict[str, List[Dict[str, Any]]] = {}
+    for reading in facts.get("supporting_readings") or []:
+        tag = reading.get("tag")
+        if tag:
+            readings_by_tag.setdefault(str(tag), []).append(reading)
+    for observation in observations:
+        tags = [observation.get("tag")] if observation.get("tag") else []
+        sources = sorted({
+            str(reading.get("data_source") or reading.get("source") or "unknown")
+            for tag in tags for reading in readings_by_tag.get(tag, [])
+        })
+        observation["data_sources"] = sources
+
+    contributor = evidence_record.get("likely_contributor_tag")
+    raw_confidence = evidence_record.get("confidence_score")
+    try:
+        has_ranked_contributor = bool(contributor and contributor != alarm_tag and float(raw_confidence or 0) > 0)
+    except (TypeError, ValueError):
+        has_ranked_contributor = False
+
+    deviations = correlated.get("correlated_deviations") or []
+    deviation = next((item for item in deviations if item.get("tag") == contributor), None)
+    contributor_observation = next((item for item in observations if item.get("tag") == contributor), None)
+    topology = context.get("topology") or {}
+    edges = topology.get("registry_dependencies") or []
+    adjacency: Dict[str, List[str]] = {}
+    for edge in edges:
+        if edge.get("source") and edge.get("target"):
+            adjacency.setdefault(str(edge["source"]), []).append(str(edge["target"]))
+    path = None
+    if has_ranked_contributor:
+        pending = [(str(contributor), [str(contributor)])]
+        visited = set()
+        while pending:
+            node, route = pending.pop(0)
+            if node == str(alarm_tag):
+                path = route
+                break
+            if node in visited:
+                continue
+            visited.add(node)
+            pending.extend((next_node, route + [next_node]) for next_node in adjacency.get(node, []))
+
+    if has_ranked_contributor:
+        cause_explanation = f"The Evidence Engine ranks {contributor} as a possible contributor from the correlated event records."
+        if contributor_observation and contributor_observation.get("summary"):
+            cause_explanation += f" Its recorded trend was: {contributor_observation['summary']}."
+        if deviation:
+            cause_explanation += (
+                " The correlated deviation was recorded before the primary alarm trigger."
+                if deviation.get("precedes_primary") is True else
+                " The correlated record does not show that this deviation preceded the primary alarm trigger."
+            )
+        if path:
+            cause_explanation += f" Configured topology links { ' → '.join(path) }; this makes the relationship plausible but does not prove physical causation."
+        else:
+            cause_explanation += " No configured topology path from this tag to the alarm is recorded, so the physical relationship remains unverified."
+        cause_status = "possible"
+        additional_evidence = [
+            f"Verify a fresh, timestamped {contributor} reading and its quality against the operator runtime.",
+            f"Compare {contributor} with the alarm-related process readings from the same time window to see whether the relationship persists.",
+            "Confirm the equipment relationship and any physical inspection findings with authorized plant personnel.",
+        ]
+    else:
+        cause_explanation = "The available records do not establish a distinct contributing factor or confirm a physical root cause."
+        cause_status = "unconfirmed"
+        additional_evidence = [
+            "Review fresh, timestamped readings for the alarm and related process tags on the operator runtime.",
+            "Check sensor quality, time alignment and the configured equipment relationships before ranking a contributor.",
+        ]
+
+    sop_status = dict(operator_response.get("relevant_sop") or {})
+    approved = sop_status.get("approved") is True
+    source_id = sop_status.get("sop_id") or "the retrieved SOP"
+    steps = [
+        f"Confirm {alarm_tag} state and the latest reading timestamps on the operator HMI.",
+    ]
+    observed_tags = list(dict.fromkeys(
+        str(item.get("tag")) for item in observations if item.get("tag")
+    ))
+    if has_ranked_contributor:
+        steps.append(f"Compare the current {contributor} indication with its recorded trend; verify sensor quality and time alignment.")
+    elif observed_tags:
+        steps.append(f"Review the recorded readings for {', '.join(observed_tags[:3])} and compare them with current runtime indications.")
+    else:
+        steps.append("Check current related sensor readings and their quality on the operator runtime; no usable historical trend was available.")
+    if approved:
+        steps.append(f"Use only the verified approved instructions from {source_id}; do not infer missing limits or actions.")
+        solution_summary = f"Approved guidance from {source_id} was verified. The numbered checks are read-only; follow the approved source for any authorized operating action."
+    else:
+        steps.append("No approved operating instructions are available. Consult the current plant-approved procedure or responsible personnel before any operating action.")
+        solution_summary = "No approved operating instructions were verified for this incident. Use the read-only checks below and consult the approved plant procedure or responsible personnel before acting."
+
+    recovery_verification = (
+        "After authorized work, verify a subsequent timestamped alarm input is clear and review fresh related readings against site-approved operating criteria. "
+        "A recorded clear state does not bypass the existing operator confirmation interlock."
+    )
+    return {
+        "problem": {
+            "equipment": equipment,
+            "alarm": alarm_tag,
+            "alarm_state": state_text,
+            "summary": problem_summary,
+            "observations": observations[:4],
+        },
+        "cause": {
+            "status": cause_status,
+            "confirmed": False,
+            "contributor_tag": contributor if has_ranked_contributor else None,
+            "explanation": cause_explanation,
+            "additional_evidence": additional_evidence,
+            "confidence_percent": None,
+        },
+        "solution": {
+            "summary": solution_summary,
+            "steps": steps[:3],
+            "approved_instructions": sop_status.get("passages", []) if approved else [],
+            "sop_status": sop_status,
+            "recovery_verification": recovery_verification,
+            "read_only": True,
+        },
+        "structured_evidence": {
+            "observations": observations,
+            "timeline": facts.get("supporting_events") or [],
+            "correlated_deviations": deviations,
+            "topology": topology,
+            "data_sources": sorted({
+                str(reading.get("data_source") or reading.get("source") or "unknown")
+                for tag_readings in readings_by_tag.values() for reading in tag_readings
+            }),
+        },
+        "sop_status": sop_status,
+    }
+
+
+def _operator_sop_reference(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose only source passages already resolved against stored SOP content."""
+    resolution = response.get("sop_resolution") or {}
+    sources = [item for item in (response.get("sources") or [])
+               if isinstance(item, dict) and item.get("verified") is True
+               and isinstance(item.get("text"), str) and len(item["text"].strip()) >= 20]
+    approved = resolution.get("approved") is True and any(item.get("approved") is True for item in sources)
+    return {
+        "status": resolution.get("status") or "not_retrieved",
+        "sop_id": resolution.get("sop_id"),
+        "document_name": resolution.get("document_name"),
+        "approved": approved,
+        "label": "APPROVED GUIDANCE" if approved else ("REFERENCE ONLY — NOT APPROVED" if sources else None),
+        "passages": [
+            {key: item.get(key) for key in (
+                "sop_id", "document_name", "revision", "section", "step_number",
+                "step_title", "page", "text", "approved", "document_status",
+            )}
+            for item in sources
+        ],
+    }
+
+
+def _approved_resolution_criteria(response: Dict[str, Any]) -> str:
+    """Do not infer closure criteria from an unapproved or partial excerpt."""
+    resolution = response.get("sop_resolution") or {}
+    if resolution.get("approved") is not True:
+        return "Not established by retrieved approved guidance."
+    criteria = response.get("sop_resolution_criteria")
+    if isinstance(criteria, str) and criteria.strip():
+        return criteria.strip()
+    if isinstance(criteria, list) and criteria:
+        return " ".join(str(item).strip() for item in criteria if str(item).strip())
+    return "No explicit resolution criteria were supplied by the retrieved approved source."
+
+
+def _load_sop_document(sop_id: str, document_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Load one stored SOP by exact ID from the bundled catalog or Qdrant."""
+    doc_dir = Path(__file__).parent / "sop_documents"
+    if doc_dir.exists() and (not document_id or document_id == sop_id):
+        for path in doc_dir.glob("*.json"):
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    document = json.load(handle)
+                if document.get("sop_id") == sop_id:
+                    return document
+            except (OSError, ValueError, TypeError):
+                continue
+    # Resolve uploaded PDF sources locally as well as via Qdrant, so a BM25
+    # fallback can still cite the exact stored revision and page.
+    try:
+        from pdf_sop_ingestion import PDF_DIR, get_pdf_path
+        for metadata_path in PDF_DIR.glob("*.json") if PDF_DIR.exists() else []:
+            try:
+                document = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if document.get("sop_id") != sop_id:
+                    continue
+                if document_id and str(document.get("document_id") or "") != str(document_id):
+                    continue
+                import fitz
+                path = get_pdf_path(sop_id, document.get("revision", ""), document.get("sha256", ""))
+                with fitz.open(path) as pdf:
+                    document["content_pages"] = [
+                        {"page": index, "text": page.get_text("text").strip()}
+                        for index, page in enumerate(pdf, start=1)
+                    ]
+                return document
+            except (OSError, ValueError, KeyError, RuntimeError):
+                continue
+    except Exception as exc:
+        logger.info("Local PDF SOP lookup unavailable (%s)", type(exc).__name__)
+    try:
+        from vector_store.qdrant_store import get_qdrant_store
+        store = get_qdrant_store()
+        return store.get_document(sop_id, document_id=document_id)
+    except Exception as exc:
+        logger.info("SOP document lookup unavailable for selected reference (%s)", type(exc).__name__)
+        return None
+
+
+def _is_document_approved(document: Optional[Dict[str, Any]]) -> bool:
+    """Require an explicit approval state and traceable approval reference."""
+    if not isinstance(document, dict):
+        return False
+    approval_status = str(document.get("approval_status") or "").strip().casefold()
+    approval_reference = str(document.get("approval_reference") or "").strip()
+    return document.get("approved") is True and approval_status == "approved" and bool(approval_reference)
+
+
+def _normalized_sop_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _resolve_retrieved_sop(
+    sop_match: Dict[str, Any],
+    retrieved_chunks: List[Dict[str, Any]],
+    document_loader: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[str]]:
+    """Resolve retrieved text to a real stored SOP step before citing it.
+
+    An ID or a bundled document alone is not a retrieval result. A source is
+    emitted only when retrieved text matches a meaningful stored step.
+    """
+    sop_id = sop_match.get("sop_id")
+    if not sop_id or sop_id in ("NONE", "SOP-NONE", "UNKNOWN-SOP"):
+        unavailable = sop_match.get("retrieval_status") == "unavailable"
+        return ({
+            "status": "retrieval_unavailable" if unavailable else "not_retrieved",
+            "approved": False,
+            "message": (
+                "SOP retrieval was unavailable; incident evidence remains available, but no applicable approved SOP could be verified."
+                if unavailable else
+                "No applicable approved SOP passage was retrieved for this incident."
+            ),
+        }, [], [])
+
+    candidates = list(retrieved_chunks or [])
+    if not candidates:
+        # SopMatch.steps is itself persisted retrieval output (BM25 selection or
+        # reconstructed vector document). It is still checked against the source.
+        candidates = [
+            {"sop_id": sop_id, "text": text, "section": f"Step {idx}", "step_number": idx, "step_title": f"Step {idx}"}
+            for idx, text in enumerate(sop_match.get("steps") or [], start=1)
+            if isinstance(text, str)
+        ]
+
+    loader = document_loader or _load_sop_document
+    if document_loader is None and candidates:
+        first_payload = candidates[0].get("payload") or candidates[0]
+        document_id = first_payload.get("document_id") if isinstance(first_payload, dict) else None
+        if document_id:
+            loader = lambda sid: _load_sop_document(sid, document_id=str(document_id))
+    try:
+        document = loader(str(sop_id))
+    except Exception as exc:
+        logger.info("SOP source resolution failed (%s)", type(exc).__name__)
+        document = None
+    if not isinstance(document, dict) or document.get("sop_id") != sop_id:
+        return ({"status": "document_not_found", "sop_id": sop_id, "approved": False,
+                 "message": "A SOP ID was returned, but the matching stored document could not be resolved."}, [], [])
+
+    stored_steps = document.get("steps") or []
+    valid_steps = [step.strip() for step in stored_steps if isinstance(step, str) and len(step.strip()) >= 20]
+    content_pages = [page for page in (document.get("content_pages") or [])
+                     if isinstance(page, dict) and isinstance(page.get("text"), str)
+                     and len(page["text"].strip()) >= 20]
+    if not valid_steps and not content_pages:
+        return ({"status": "document_content_unavailable", "sop_id": sop_id,
+                 "document_name": document.get("title") or sop_id, "approved": False,
+                 "message": "The matched SOP document exists, but it contains no meaningful step content."}, [], [])
+
+    sources: List[Dict[str, Any]] = []
+    seen_steps = set()
+    normalized_steps = [(_normalized_sop_text(text), index, text)
+                        for index, text in enumerate(valid_steps, start=1)]
+    approved = _is_document_approved(document)
+    for chunk in candidates:
+        if not isinstance(chunk, dict):
+            continue
+        payload = chunk.get("payload") or chunk
+        chunk_sop_id = chunk.get("sop_id") or payload.get("sop_id") or sop_id
+        if chunk_sop_id != sop_id:
+            continue
+        retrieved_text = chunk.get("text") or payload.get("instruction") or payload.get("text")
+        normalized = _normalized_sop_text(retrieved_text)
+        if len(normalized) < 20:
+            continue
+        resolved = next((item for item in normalized_steps
+                         if item[0] == normalized or (len(normalized) >= 40 and normalized in item[0])
+                         or (len(item[0]) >= 40 and item[0] in normalized)), None)
+        page = payload.get("page")
+        section = payload.get("section") or ""
+        if resolved:
+            _, step_number, step_text = resolved
+            reference_key = ("step", step_number)
+            section_label = f"Step {step_number}"
+        else:
+            # PDF ingestion stores page-aware excerpts rather than pretending
+            # arbitrary PDF paragraphs are numbered procedure steps. Resolve
+            # the excerpt against the stored page text and cite that page.
+            source_page = next((item for item in content_pages
+                                if page is None or str(item.get("page")) == str(page)), None)
+            if source_page is None:
+                continue
+            normalized_page = _normalized_sop_text(source_page.get("text"))
+            if len(normalized) < 40 or normalized not in normalized_page:
+                continue
+            step_number = None
+            step_text = str(retrieved_text).strip()
+            reference_key = ("page", source_page.get("page"), normalized)
+            section_title = payload.get("section_title")
+            section_label = str(section_title or (f"Page {source_page.get('page')}"))
+            page = source_page.get("page")
+        if reference_key in seen_steps:
+            continue
+        seen_steps.add(reference_key)
+        sources.append({
+            "document_name": document.get("title") or sop_match.get("sop_title") or sop_id,
+            "sop_id": sop_id,
+            "section": section_label,
+            "step_number": step_number,
+            "step_title": section_label,
+            "revision": document.get("revision") or payload.get("revision"),
+            "page": page,
+            "text": step_text,
+            "verified": True,
+            "approved": approved,
+            "document_status": "Approved procedure" if approved else (document.get("document_status") or "Approval status not verified"),
+            "retrieval_method": sop_match.get("retrieval_method") or sop_match.get("source"),
+        })
+
+    if not sources:
+        resolution = {
+            "status": "document_content_unavailable", "sop_id": sop_id,
+            "document_name": document.get("title") or sop_id, "approved": False,
+            "message": "The SOP document exists, but no retrieved content could be matched to a stored step.",
+        }
+        return resolution, [], []
+
+    status = "reference_approved" if approved else "reference_unapproved"
+    return ({"status": status, "sop_id": sop_id,
+             "document_name": document.get("title") or sop_id,
+             "approved": approved, "message": "Retrieved step resolved against stored SOP content."},
+            sources, [item["text"] for item in sources])
+
+
+def resolve_event_sop_reference(event: Dict[str, Any]) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Public, deterministic source-resolution helper for read-only event APIs."""
+    match = event.get("sop_match") or {}
+    if hasattr(match, "model_dump"):
+        match = match.model_dump(mode="json")
+    elif hasattr(match, "dict"):
+        match = match.dict()
+    if not isinstance(match, dict):
+        match = {}
+    chunks = match.get("retrieved_chunks") or match.get("chunks") or []
+    resolution, sources, _ = _resolve_retrieved_sop(match, chunks)
+    return resolution, sources
 
 
 def build_assistant_response(
@@ -265,7 +692,10 @@ def build_assistant_response(
     context: Optional[Dict[str, Any]] = None,
     similar_incidents: Optional[List[Dict[str, Any]]] = None,
     conversation_id: Optional[str] = None,
+    sop_document_loader: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
+    response_started = perf_counter()
     question_text = question.strip()
     lower_question = question_text.lower()
     candidate = event.get("candidate") or {}
@@ -337,92 +767,28 @@ def build_assistant_response(
         } for item in context.get("related_events", []))
 
     selected_sop_id = sop.get("sop_id")
-    is_explicit_none = selected_sop_id in ("NONE", "SOP-NONE", "UNKNOWN-SOP")
-    sop_steps = list(sop.get("steps") or [])
-    has_valid_sop = bool(selected_sop_id and not is_explicit_none)
-
-    # Enrich from bundled SOP documents if steps or document_status are missing
-    if not is_explicit_none:
-        candidate_tag = candidate.get("primary_tag") or candidate.get("alarm_id") or ""
-        doc_dir = Path(__file__).parent / "sop_documents"
-        if doc_dir.exists():
-            for p in doc_dir.glob("*.json"):
-                try:
-                    with open(p, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        matched = False
-                        if selected_sop_id and data.get("sop_id") == selected_sop_id:
-                            matched = True
-                        elif not selected_sop_id and candidate_tag and candidate_tag in data.get("tags", []):
-                            matched = True
-                        if matched:
-                            if not selected_sop_id:
-                                selected_sop_id = data.get("sop_id")
-                                sop["sop_id"] = selected_sop_id
-                                sop["sop_title"] = data.get("title")
-                            if not sop_steps and data.get("steps"):
-                                sop_steps = list(data.get("steps"))
-                                sop["steps"] = sop_steps
-                            if not sop.get("document_status") and data.get("document_status"):
-                                sop["document_status"] = data.get("document_status")
-                            if data.get("approved") is not None and sop.get("approved") is None:
-                                sop["approved"] = data.get("approved")
-                            has_valid_sop = True
-                            break
-                except Exception:
-                    pass
-
+    is_explicit_none = selected_sop_id in (None, "", "NONE", "SOP-NONE", "UNKNOWN-SOP")
     chunks = sop.get("retrieved_chunks") or sop.get("chunks") or []
-    sources = []
-    for chunk in chunks:
-        payload = chunk.get("payload") or chunk
-        chunk_sop_id = chunk.get("sop_id") or payload.get("sop_id")
-        if selected_sop_id and chunk_sop_id and chunk_sop_id != selected_sop_id:
-            continue
-        text = chunk.get("text") or payload.get("text")
-        if not text:
-            continue
-        chunk_status = (
-            payload.get("document_status")
-            or sop.get("document_status")
-            or ("Approved procedure" if has_valid_sop and sop.get("approved") else "Approval status not verified")
-        )
-        sources.append({
-            "document_name": payload.get("document_name") or payload.get("document_id") or payload.get("source") or sop.get("sop_title") or "Retrieved SOP source",
-            "sop_id": chunk_sop_id or selected_sop_id,
-            "section": payload.get("section") or "Section unavailable",
-            "page": payload.get("page"),
-            "text": text,
-            "document_status": chunk_status,
-        })
+    if progress_callback:
+        progress_callback("retrieving_procedure")
+    sop_started = perf_counter()
+    sop_resolution, sources, sop_steps = _resolve_retrieved_sop(sop, chunks, sop_document_loader)
+    sop_retrieval_ms = round((perf_counter() - sop_started) * 1000, 3)
+    approved_sop = bool(sop_resolution.get("approved") and sources)
 
-    first_chunk_payload = (chunks[0].get("payload") or chunks[0]) if chunks else {}
-    doc_status = sop.get("document_status") or first_chunk_payload.get("document_status") or ""
-    status_text = str(doc_status or "").lower()
-    is_unverified = any(phrase in status_text for phrase in ("not verified", "unverified", "not approved", "unapproved", "draft"))
-    approved_sop = has_valid_sop and not is_unverified and (
-        sop.get("approved") is True
-        or "approved" in status_text
-        or "ecostruxure" in status_text
-        or (bool(sop_steps) and not is_unverified)
-    )
-
-    if not sources and sop_steps:
-        for idx, step_text in enumerate(sop_steps, start=1):
-            sources.append({
-                "document_name": sop.get("sop_title") or sop.get("sop_id") or "Standard Operating Procedure",
-                "sop_id": selected_sop_id,
-                "section": f"Step {idx}",
-                "page": 1,
-                "text": step_text,
-                "document_status": "Approved procedure",
-            })
-
-    wants_procedure = any(word in lower_question for word in ("sop", "procedure", "instruction", "steps", "what should", "how do i", "what all steps", "steps to resolve"))
+    wants_procedure = any(word in lower_question for word in (
+        "sop", "procedure", "instruction", "steps", "what should", "how do i",
+        "what all steps", "steps to resolve", "what actions", "actions to be taken",
+        "action to take", "to resolve", "resolve the problem", "resolve this", "fix the problem",
+    ))
     asks_first_last = any(phrase in lower_question for phrase in ("first and last", "first value", "last value", "first reading", "last reading"))
     asks_actions = any(word in lower_question for word in ("operator action", "operator actions", "audit action", "what did the operator", "actions recorded"))
     asks_history = any(word in lower_question for word in ("last 30", "historical", "history", "before the alarm", "before this alarm", "what changed", "which readings", "trend", "changed during"))
     asks_missing = any(phrase in lower_question for phrase in ("missing", "what information", "insufficient", "not recorded"))
+    asks_interpretation = any(phrase in lower_question for phrase in (
+        "explain", "contributed", "contribute", "what does", "what do", "indicate",
+        "suspected cause", "help verify", "verify the cause",
+    ))
     asks_recurrence = any(phrase in lower_question for phrase in ("happened", "earlier today", "similar incident", "this valve today", "this pump today", "has this happened"))
     is_hypothetical = (
         lower_question.startswith("what if")
@@ -502,7 +868,29 @@ def build_assistant_response(
                     answer_parts.append("For the 30-minute context window, recorded trends: " + " ".join(_trend_sentence(trend) for trend in usable))
                 else:
                     answer_parts.append("No usable numeric historical readings were recorded for the relevant tags in this 30-minute context window; no trend can be calculated.")
-            answer_parts.append("Sufficient approved procedure guidance was not retrieved for this incident. Consult the approved plant procedure or responsible personnel before taking action. Any passages below are source excerpts only; their approval status is not verified.")
+            if sources and sop_resolution.get("status") == "reference_unapproved":
+                locations = ", ".join(dict.fromkeys(str(item.get("section") or item.get("page") or "source passage") for item in sources[:3]))
+                answer_parts.append(
+                    f"Relevant reference-only content was retrieved from {selected_sop_id} ({locations}). "
+                    "Its approval status is not verified, so OpsLens cannot present it as authorized operating guidance. "
+                    "The source passages are shown separately for review."
+                )
+            else:
+                resolution_message = sop_resolution.get("message") or "No relevant SOP step content was retrieved."
+                if any(word in lower_question for word in ("resolve", "fix", "steps", "operator", "what should")):
+                    answer_parts.append(
+                        "No applicable approved SOP content was retrieved, so these are general read-only verification steps, not an approved procedure: "
+                        "1. Confirm the alarm's current state on the HMI. "
+                        "2. Check the latest relevant sensor readings and timestamps. "
+                        "3. Inspect the components associated with the strongest evidence using authorized site practices. "
+                        "4. Consult the applicable plant-approved SOP. "
+                        "5. Perform only authorized inspection or corrective actions. "
+                        "6. Verify the equipment returns to approved operating conditions. "
+                        "7. Record the outcome. "
+                        f"{resolution_message}"
+                    )
+                else:
+                    answer_parts.append(f"{resolution_message} Consult the approved plant procedure or responsible personnel before taking action.")
             answer = " ".join(answer_parts)
             uncertainty = "insufficient_approved_procedure"
             immediate_checks = [
@@ -537,6 +925,37 @@ def build_assistant_response(
         else:
             answer = "The 30-minute context window does not flag additional missing fields beyond what is shown in the supporting readings, events, and sources."
             uncertainty = "context_fields_present"
+    elif asks_interpretation and is_trend_query:
+        usable = [trend for trend in trends if trend.get("reading_count", 0) > 0]
+        resistance = next((trend for trend in usable if "differential pressure" in str(
+            getattr(TAG_REGISTRY.get(str(trend.get("tag") or "")), "short_label", "")
+        ).lower()), None)
+        flow = next((trend for trend in usable if "flow" in str(
+            getattr(TAG_REGISTRY.get(str(trend.get("tag") or "")), "short_label", "")
+        ).lower()), None)
+        resistance_change = _concise_trend_change(resistance) if resistance else None
+        flow_change = _concise_trend_change(flow) if flow else None
+        if resistance_change and flow_change:
+            flow_delta = flow.get("absolute_change")
+            throughput_direction = "higher" if isinstance(flow_delta, (int, float)) and flow_delta > 0 else "lower" if isinstance(flow_delta, (int, float)) and flow_delta < 0 else "changed"
+            answer = (
+                f"{resistance_change}. A rise in differential pressure is consistent with increasing resistance or screen loading, "
+                f"so it may have contributed to {alarm_id}; this association does not confirm blockage or physical cause. "
+                f"{flow_change}, indicating {throughput_direction} recorded inlet throughput; timing alone does not show that flow caused the pressure rise. "
+                "Useful evidence to verify the relationship would include screen/rake cleaning status, differential-pressure instrument condition, "
+                "and synchronized upstream/downstream flow readings with timestamps and quality."
+            )
+            uncertainty = "hypothesis_requires_operator_verification"
+        elif usable:
+            changes = [value for value in (_concise_trend_change(item) for item in usable[:2]) if value]
+            answer = (
+                "Recorded trend evidence: " + "; ".join(changes) +
+                ". The available trends do not confirm a physical cause."
+            )
+            uncertainty = "hypothesis_requires_operator_verification"
+        else:
+            answer = "No relevant recorded sensor trends are available to interpret this suspected cause. Which sensor or time range should I examine?"
+            uncertainty = "insufficient_historical_readings"
     elif asks_actions:
         actions = context.get("operator_actions", []) if context is not None else []
         if actions:
@@ -632,6 +1051,7 @@ def build_assistant_response(
         "supporting_events": events,
         "similar_incidents": list(similar_incidents or []),
         "sources": sources,
+        "sop_resolution": sop_resolution,
         "trend_summaries": trends,
         "immediate_checks": immediate_checks[:2],
         "incident_context": {
@@ -650,8 +1070,16 @@ def build_assistant_response(
         "conversation_id": conversation_id,
         "fallback_used": True,
         "llm_used": False,
+        "timings_ms": {
+            "sop_retrieval_and_source_resolution": sop_retrieval_ms,
+            "evidence_processing": round(max(0.0, (perf_counter() - response_started) * 1000 - sop_retrieval_ms), 3),
+        },
     }
     result["operator_response"] = _operator_response(event, result)
+    result["question_answer"] = result["answer"]
+    structured = _structured_assessment(event, result, result["operator_response"])
+    result.update(structured)
+    result["operator_response"].update(structured)
     result["answer"] = _render_operator_answer(result["operator_response"])
     return result
 
@@ -671,12 +1099,29 @@ def _render_operator_answer(response: Dict[str, Any]) -> str:
     limitations = response.get("data_limitations") or []
     if limitations:
         sections.append("Data limitations\n" + "\n".join(f"• {item}" for item in limitations))
+    sop_reference = response.get("relevant_sop") or {}
+    passages = sop_reference.get("passages") or []
+    if passages:
+        heading = "Relevant SOP reference"
+        if sop_reference.get("approved") is not True:
+            heading += " · REFERENCE ONLY — NOT APPROVED"
+        source_lines = []
+        for item in passages[:5]:
+            location = item.get("section") or (f"Page {item['page']}" if item.get("page") else "Retrieved passage")
+            source_lines.append(f"{item.get('sop_id') or sop_reference.get('sop_id')} · {location}: {item.get('text')}")
+        sections.append(heading + "\n" + "\n".join(f"• {item}" for item in source_lines))
+    criteria = response.get("resolution_criteria")
+    if criteria:
+        sections.append("Resolution criteria\n" + str(criteria))
     return "\n\n".join(sections)
 
 
-_IDENTIFIER = re.compile(r"\b[A-Z][A-Z0-9]*-\d+(?:-[A-Z0-9]+)*\b", re.IGNORECASE)
+# Plant identifiers contain numeric segments in different positions (for
+# example ALM-C01-VB and SOP-P02-VLV-01). Mask the whole hyphenated identifier
+# before measurement validation so those digits are never treated as claims.
+_IDENTIFIER = re.compile(r"\b(?=[A-Z0-9-]*\d)[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b", re.IGNORECASE)
 _NAMED_COMPONENTS = re.compile(
-    r"\b(?:valve|pump|compressor|tank|unit|transmitter|filter|circuit|breaker|line|header|switch|motor|vessel|stage|loop|step|check|item|action|point|rule|clause|phase|section|option|rev|revision|sop|page)\s*#?\s*\d+(?:-[A-Za-z0-9]+)*\b",
+    r"\b(?:valve|pump|compressor|tank|unit|transmitter|filter|circuit|breaker|line|header|switch|motor|vessel|stage|loop|step|check|item|action|point|rule|clause|phase|section|option|rev|revision|sop|page)\s*#?\s*\d+(?:\.\d+)*(?:-[A-Za-z0-9]+)*\b",
     re.IGNORECASE,
 )
 _BULLET_NUMBERS = re.compile(r"(?:(?<=^)|(?<=\s))\d+\.(?=\s)")
@@ -728,23 +1173,22 @@ def compact_llm_context(
     # percentage points, while percentage_change is relative to its start.
     numeric_facts = _structured_numeric_facts(trends, context.get("window"))
     sources = []
-    for item in (grounded.get("sources") or [])[:4]:
-        status = item.get("document_status") or "Approval status not verified"
-        status_lower = str(status).strip().lower()
-        is_unverified = any(phrase in status_lower for phrase in ("not verified", "unverified", "not approved", "unapproved", "draft"))
-        explicitly_approved = not is_unverified and (
-            "approved" in status_lower
-            or "ecostruxure" in status_lower
-        )
+    for item in (grounded.get("sources") or [])[:5]:
+        explicitly_approved = item.get("verified") is True and item.get("approved") is True
         sources.append({
             "document_name": item.get("document_name"),
             "sop_id": item.get("sop_id"),
             "section": item.get("section"),
+            "step_number": item.get("step_number"),
+            "step_title": item.get("step_title"),
+            "verified": item.get("verified") is True,
+            "approved": item.get("approved") is True,
             "page": item.get("page"),
-            "document_status": status,
-            # Keep unverified procedure text out of the model prompt entirely.
-            # It remains available in the UI as a clearly labeled reference.
-            "text": (item.get("text") or "")[:500] if explicitly_approved else None,
+            "document_status": item.get("document_status") or "Approval status not verified",
+            # Retrieved unapproved text is descriptive reference evidence only;
+            # the prompt forbids turning it into operational recommendations.
+            "usage": "approved_guidance" if explicitly_approved else "reference_only_not_approved",
+            "text": (item.get("text") or "")[:500] if item.get("verified") is True else None,
         })
     history = conversation or []
     limit = int(os.environ.get("OPSLENS_ASSISTANT_HISTORY_LIMIT", "8"))
@@ -1099,19 +1543,32 @@ def _llm_answer_rejection_reason(text: str, grounded: Dict[str, Any], compact: D
     if not text or not isinstance(text, str) or len(text.strip()) < 8:
         return "empty_or_short_answer"
     lowered = text.lower()
-    if wants_procedure and grounded.get("uncertainty_status") == "insufficient_approved_procedure":
+    if wants_procedure:
+        has_approved_passage = any(
+            item.get("verified") is True and item.get("approved") is True and item.get("text")
+            for item in (compact.get("sop_passages") or [])
+        )
+        if not has_approved_passage and re.search(
+            r"\b(?:according to|per|the SOP (?:says|states|instructs|requires)|the procedure (?:says|states|instructs|requires)|SOP guidance says)\b",
+            text, re.IGNORECASE,
+        ):
+            return "unretrieved_sop_instruction_claim"
+    if (wants_procedure and (grounded.get("sop_resolution") or {}).get("status") == "reference_unapproved"):
         # We may still use the model to explain incident evidence, but retrieved
-        # unverified material must never become an instruction. Reject imperative
-        # procedural language and use the deterministic, explicitly unverified
-        # answer if the model crosses that boundary.
+        # unverified material must never become an instruction, regardless of
+        # how the operator phrased the incident question.
         if _UNVERIFIED_PROCEDURAL_INSTRUCTION.search(text) or any(
             phrase in lowered for phrase in ("increase setpoint", "reset the plc")
         ):
             logger.warning("[Assistant] Rejected LLM answer containing actionable language for an unverified SOP")
             return "unverified_sop_actionable_language"
+    # Unapproved reference passages may be shown verbatim in the UI, but their
+    # numeric thresholds/timestamps are not LLM grounding evidence. Otherwise
+    # a number in a draft SOP could authorize a generated operating claim.
+    validation_grounded, validation_compact = _llm_grounding_evidence(grounded, compact)
     allowed_timestamps = _timestamps_in(
-        grounded.get("answer"), compact, grounded.get("supporting_readings"),
-        grounded.get("supporting_events"), grounded.get("sources"),
+        validation_grounded.get("answer"), validation_compact, validation_grounded.get("supporting_readings"),
+        validation_grounded.get("supporting_events"), validation_grounded.get("sources"),
     )
     output_timestamps = set(_ISO_TIMESTAMP.findall(text))
     if output_timestamps:
@@ -1120,22 +1577,22 @@ def _llm_answer_rejection_reason(text: str, grounded: Dict[str, Any], compact: D
             logger.warning("[Assistant] Rejected LLM answer containing an unrecorded timestamp")
             return "ungrounded_timestamp"
     allowed_dates = _date_fragments(
-        grounded.get("answer"), compact, grounded.get("supporting_readings"),
-        grounded.get("supporting_events"), grounded.get("sources"),
+        validation_grounded.get("answer"), validation_compact, validation_grounded.get("supporting_readings"),
+        validation_grounded.get("supporting_events"), validation_grounded.get("sources"),
     )
     if set(_ISO_DATE_FRAGMENT.findall(text)) - allowed_dates:
         logger.warning("[Assistant] Rejected LLM answer containing an unrecorded date")
         return "ungrounded_timestamp"
     allowed_clocks = _clock_fragments(
-        grounded.get("answer"), compact, grounded.get("supporting_readings"),
-        grounded.get("supporting_events"), grounded.get("sources"),
+        validation_grounded.get("answer"), validation_compact, validation_grounded.get("supporting_readings"),
+        validation_grounded.get("supporting_events"), validation_grounded.get("sources"),
     )
     output_clocks = set(_CLOCK_FRAGMENT.findall(_ISO_TIMESTAMP.sub(" ", text)))
     if output_clocks - allowed_clocks:
         logger.warning("[Assistant] Rejected LLM answer containing an unrecorded clock time")
         return "ungrounded_timestamp"
-    allowed = _allowed_numbers(grounded.get("answer"), compact, grounded.get("supporting_readings"), grounded.get("supporting_events"), grounded.get("sources"))
-    tag_facts = _tag_numeric_facts(compact)
+    allowed = _allowed_numbers(validation_grounded.get("answer"), validation_compact, validation_grounded.get("supporting_readings"), validation_grounded.get("supporting_events"), validation_grounded.get("sources"))
+    tag_facts = _tag_numeric_facts(validation_compact)
     numeric_text = _ISO_TIMESTAMP.sub(lambda match: " " * len(match.group()), text)
     numeric_text = _ISO_DATE_FRAGMENT.sub(lambda match: " " * len(match.group()), numeric_text)
     # Clock fragments are validated against recorded timestamp fields above;
@@ -1176,7 +1633,18 @@ def _llm_answer_rejection_reason(text: str, grounded: Dict[str, Any], compact: D
         mentioned_tags = [tag for tag in tag_facts if re.search(
             rf"(?<![A-Z0-9]){re.escape(tag)}(?![A-Z0-9])", clause, re.IGNORECASE
         )]
-        scoped_tags = _nearest_tag_scope(clause, match.start(), mentioned_tags)
+        # A nearby alarm identifier can be closer to a reading token than the
+        # sensor tag that owns it (for example "DPT rose from 0.99 to 4.8 kPa
+        # before ALM-..."). Prefer the unique tag whose engineering unit is
+        # explicitly attached to the clause; fall back to positional scoping
+        # only when the unit does not disambiguate the instruments.
+        unit_scoped_tags = [
+            tag for tag in mentioned_tags
+            if tag_facts[tag]["unit"] and _unit_mentioned(tag_facts[tag]["unit"], clause)
+        ]
+        scoped_tags = unit_scoped_tags if len(unit_scoped_tags) == 1 else _nearest_tag_scope(
+            clause, match.start(), mentioned_tags
+        )
         if not scoped_tags:
             # A percentage-point unit can uniquely identify a % instrument,
             # but only when there is exactly one such instrument in this clause.
@@ -1216,6 +1684,32 @@ def _llm_answer_rejection_reason(text: str, grounded: Dict[str, Any], compact: D
             )
             return "ungrounded_numeric_value"
     return None
+
+
+def _llm_grounding_evidence(grounded: Dict[str, Any], compact: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Exclude unapproved source prose from numeric/time grounding whitelists."""
+    grounded_facts = dict(grounded)
+    rendered_answer = grounded_facts.get("answer") or ""
+    grounded_facts["answer"] = rendered_answer.split("\n\nRelevant SOP reference", 1)[0]
+    grounded_facts["sources"] = [
+        source for source in (grounded_facts.get("sources") or [])
+        if isinstance(source, dict) and source.get("verified") is True and source.get("approved") is True
+    ]
+    compact_facts = dict(compact)
+    compact_facts["sop_passages"] = [
+        passage for passage in (compact_facts.get("sop_passages") or [])
+        if isinstance(passage, dict) and passage.get("verified") is True and passage.get("approved") is True
+    ]
+    # The deterministic operator answer intentionally renders unapproved
+    # source text verbatim in its reference-only section. Keep that text
+    # visible to the operator, but exclude it from the numeric/time whitelist
+    # just as we exclude the unapproved passage metadata above.
+    deterministic_answer = compact_facts.get("deterministic_answer")
+    if isinstance(deterministic_answer, str):
+        compact_facts["deterministic_answer"] = deterministic_answer.split(
+            "\n\nRelevant SOP reference", 1
+        )[0]
+    return grounded_facts, compact_facts
 
 
 def _unit_mentioned(unit: str, clause: str) -> bool:
@@ -1291,12 +1785,43 @@ def build_assistant_prompt(question: str, compact: Dict[str, Any]) -> str:
     unverified_sop_policy = ""
     if compact.get("uncertainty_status") == "insufficient_approved_procedure":
         unverified_sop_policy = (
-            "SOP STATUS IS UNVERIFIED: answer the historical/evidence part of the question, "
-            "then state only that sufficient approved guidance was not retrieved. Do not quote, "
-            "paraphrase, or turn SOP passages into actions, steps, checks, or recommendations. "
-            "Do not produce immediate checks for this response.\n"
+            "SOP STATUS IS UNVERIFIED: you may give one concise descriptive summary of the actual "
+            "retrieved passage, attributed to its SOP ID and section and explicitly labelled "
+            "REFERENCE ONLY — NOT APPROVED. Describe what the passage covers; do not phrase it as "
+            "an imperative, recommendation, operating instruction, setpoint, or resolution criterion. "
+            "State that approved guidance was not retrieved. Do not derive immediate checks from it.\n"
         )
-    facts_compact = {k: v for k, v in compact.items() if k not in ("topology", "incident_analysis")}
+    # Preserve the SOP excerpts and incident facts as a priority packet. A
+    # blind character slice of the whole context used to truncate sop_passages
+    # after dense trend/event data, so retrieval could succeed without its
+    # relevant text ever reaching the model.
+    facts_compact = {
+        "selected_event": compact.get("selected_event"),
+        "window": compact.get("window"),
+        "trend_summaries": (compact.get("trend_summaries") or [])[:6],
+        "numeric_facts": compact.get("numeric_facts") or [],
+        "related_events": (compact.get("related_events") or [])[:6],
+        "operator_actions": (compact.get("operator_actions") or [])[:6],
+        "event_story": compact.get("event_story"),
+        "evidence": compact.get("evidence"),
+        "sop_passages": compact.get("sop_passages") or [],
+        "missing_data": compact.get("missing_data") or [],
+        "hypotheses": (compact.get("hypotheses") or [])[:6],
+        "similar_incidents_in_available_day_window": (compact.get("similar_incidents_in_available_day_window") or [])[:4],
+        "recent_conversation": (compact.get("recent_conversation") or [])[-4:],
+        "uncertainty_status": compact.get("uncertainty_status"),
+    }
+    facts_json = json.dumps(facts_compact, default=str)
+    # This bound is well above the compact packet for current OpsLens scenarios;
+    # if exceeded, keep the leading incident/SOP fields rather than slicing the
+    # JSON mid-passage.
+    if len(facts_json) > 12000:
+        facts_compact["trend_summaries"] = (facts_compact.get("trend_summaries") or [])[:3]
+        facts_compact["numeric_facts"] = (facts_compact.get("numeric_facts") or [])[:12]
+        facts_compact["related_events"] = (facts_compact.get("related_events") or [])[:3]
+        facts_compact["operator_actions"] = (facts_compact.get("operator_actions") or [])[:3]
+        facts_compact["recent_conversation"] = (facts_compact.get("recent_conversation") or [])[-2:]
+        facts_json = json.dumps(facts_compact, default=str)
     return (
         "You are OpsLens, a read-only industrial HMI copilot. Use ONLY the JSON facts.\n"
         "Answer the exact operator question first; do not return a generic incident summary when a specific fact was asked for.\n"
@@ -1317,11 +1842,11 @@ def build_assistant_prompt(question: str, compact: Dict[str, Any]) -> str:
         "Never present evidence scores as probabilities. If facts are missing, say so.\n"
         "Answer open-ended natural-language questions using relevant records in FACTS; these examples do not limit question types. For topology, actions, recurrence, or handover, use only the corresponding records and stated time coverage. If FACTS do not cover the requested period or topic, state what is unavailable.\n"
         "For missing-information questions, list only gaps explicitly present in missing_data or the selected-event facts.\n"
-        "For SOP questions, identify the document and section only when present in sop_passages. Check document_status: if it is not explicitly approved, state that sufficient approved guidance was not retrieved. You may still explain recorded readings, trends, event timing, and evidence-based hypotheses. Do not provide procedural steps or control instructions from an unverified source.\n"
+        "For SOP questions, identify the document and section only when present in sop_passages. Check document_status and usage. If usage is reference_only_not_approved, summarize only the subject of the actual passage in descriptive language, label it REFERENCE ONLY — NOT APPROVED, and state that approved guidance was not retrieved; never turn it into an instruction or recommended action. You may still explain recorded readings, trends, event timing, and evidence-based hypotheses.\n"
         f"{unverified_sop_policy}"
         "This assistant cannot change setpoints, acknowledge alarms, or issue PLC commands.\n"
         "Return JSON: {\"answer\": string, \"uncertainty_status\": string, \"immediate_checks\": [string, string]}. The answer is the concise bottom line; do not duplicate the evidence panel.\n\n"
-        f"OPERATOR_QUESTION:\n{question}\n\nFACTS:\n{json.dumps(facts_compact, default=str)[:4500]}"
+        f"OPERATOR_QUESTION:\n{question}\n\nFACTS:\n{facts_json}"
     )
 
 
@@ -1334,15 +1859,23 @@ def answer_incident_question(
     conversation: Optional[List[Dict[str, str]]] = None,
     llm_complete: Optional[Callable[[str], str]] = None,
     assembly_latency_ms: Optional[float] = None,
+    sop_document_loader: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     started = perf_counter()
     grounded = build_assistant_response(
         event, question, context=context,
         similar_incidents=similar_incidents, conversation_id=conversation_id,
+        sop_document_loader=sop_document_loader, progress_callback=progress_callback,
     )
+    if progress_callback:
+        progress_callback("deterministic_analysis_available")
     compact = compact_llm_context(event, context, grounded, conversation=conversation, similar_incidents=similar_incidents)
     wants_procedure = any(word in question.lower() for word in ("sop", "procedure", "instruction", "steps", "what should", "how do i"))
     generation_started = perf_counter()
+    initial_inference_ms: Optional[float] = None
+    correction_inference_ms: Optional[float] = None
+    grounding_validation_ms: Optional[float] = None
     llm_complete = llm_complete or _llm_complete_override
     used_llm = False
     fallback_reason = "deterministic_record_grounded"
@@ -1354,6 +1887,9 @@ def answer_incident_question(
     used_model = None
     accepted_llm_answer: Optional[str] = None
     provider_request_id = uuid4().hex[:12]
+    provider_attempts: List[Dict[str, Any]] = []
+    grounding_validation_result = "not_run"
+    validation_rejection_reason: Optional[str] = None
     try:
         from llm_provider import configuration_error, llm_model, selected_provider
         selected_provider_name = selected_provider()
@@ -1369,19 +1905,65 @@ def answer_incident_question(
         else:
             llm_complete = None
 
+    logger.info(
+        "assistant_request_start request_id=%s incident_id=%s provider=%s model=%s provider_attempted=%s",
+        provider_request_id, event.get("event_id") or "unknown", selected_provider_name,
+        selected_model or "none", llm_complete is not None,
+    )
+
     def invoke_provider(prompt_text: str, call_type: str) -> str:
         context_token = None
+        attempt = {
+            "call_type": call_type,
+            "provider_attempted": True,
+            "response_received": False,
+            "http_status": None,
+            "latency_ms": None,
+            "parse_result": "not_run",
+            "grounding_result": "not_run",
+            "validation_rejection_reason": None,
+        }
+        provider_attempts.append(attempt)
+        call_started = perf_counter()
         try:
-            from llm_provider import reset_provider_request_context, set_provider_request_context
+            from llm_provider import (
+                clear_provider_http_status, get_provider_http_status,
+                reset_provider_request_context, set_provider_request_context,
+            )
+            clear_provider_http_status()
             context_token = set_provider_request_context(provider_request_id, call_type)
         except Exception:
             reset_provider_request_context = None
+            get_provider_http_status = None
         logger.info("assistant_provider_call request_id=%s call_type=%s result=start", provider_request_id, call_type)
         try:
-            return llm_complete(prompt_text)
+            response = llm_complete(prompt_text)
+            attempt.update(
+                response_received=bool(isinstance(response, str) and response.strip()),
+                http_status=get_provider_http_status() if get_provider_http_status else None,
+                latency_ms=round((perf_counter() - call_started) * 1000, 3),
+            )
+            logger.info(
+                "assistant_provider_call request_id=%s incident_id=%s call_type=%s provider=%s model=%s result=response_received response_received=%s http_status=%s latency_ms=%.3f",
+                provider_request_id, event.get("event_id") or "unknown", call_type,
+                selected_provider_name, selected_model or "none", attempt["response_received"],
+                attempt["http_status"] or "none", attempt["latency_ms"],
+            )
+            return response
         except Exception as exc:
             reason = getattr(exc, "kind", None) or "provider_error"
-            logger.warning("assistant_provider_call request_id=%s call_type=%s result=failed reason=%s", provider_request_id, call_type, reason)
+            attempt.update(
+                http_status=(get_provider_http_status() if get_provider_http_status else None)
+                or getattr(exc, "status_code", None),
+                latency_ms=round((perf_counter() - call_started) * 1000, 3),
+                error_type=type(exc).__name__,
+            )
+            logger.warning(
+                "assistant_provider_call request_id=%s incident_id=%s call_type=%s provider=%s model=%s result=failed reason=%s error_type=%s http_status=%s latency_ms=%.3f",
+                provider_request_id, event.get("event_id") or "unknown", call_type,
+                selected_provider_name, selected_model or "none", reason, type(exc).__name__,
+                attempt["http_status"] or "none", attempt["latency_ms"],
+            )
             raise
         finally:
             if context_token is not None and reset_provider_request_context:
@@ -1389,21 +1971,36 @@ def answer_incident_question(
 
     if llm_complete is not None:
         try:
+            if progress_callback:
+                progress_callback("generating_explanation")
             prompt = build_assistant_prompt(question, compact)
+            inference_started = perf_counter()
             raw = invoke_provider(prompt, "initial_inference")
+            initial_inference_ms = round((perf_counter() - inference_started) * 1000, 3)
             parsed = _parse_llm_payload(raw)
+            provider_attempts[-1]["parse_result"] = "valid_json" if parsed else "invalid_response_schema"
+            validation_started = perf_counter()
             rejection_reason = (
                 _llm_answer_rejection_reason(parsed["answer"], grounded, compact, wants_procedure)
                 if parsed else "malformed_or_ungrounded_llm_output"
             )
+            validation_elapsed = (perf_counter() - validation_started) * 1000
+            grounding_validation_ms = (grounding_validation_ms or 0.0) + validation_elapsed
+            grounding_validation_result = "passed" if rejection_reason is None else "rejected"
+            validation_rejection_reason = rejection_reason
+            provider_attempts[-1]["grounding_result"] = grounding_validation_result
+            provider_attempts[-1]["validation_rejection_reason"] = rejection_reason
             logger.info(
-                "assistant_provider_output request_id=%s call_type=initial_inference output_used=%s reason=%s",
-                provider_request_id, rejection_reason is None, rejection_reason or "none",
+                "assistant_provider_output request_id=%s incident_id=%s call_type=initial_inference parse_result=%s grounding_result=%s validation_rejection_reason=%s",
+                provider_request_id, event.get("event_id") or "unknown",
+                provider_attempts[-1]["parse_result"], grounding_validation_result,
+                rejection_reason or "none",
             )
             # One bounded correction pass for unsupported numeric claims. The
             # second draft is independently validated and is never trusted by
             # virtue of being a retry.
-            if parsed and rejection_reason in {"ungrounded_numeric_value", "ungrounded_timestamp"}:
+            correction_lock = _CORRECTION_LOCKS[hash(str(event.get("event_id") or "")) % len(_CORRECTION_LOCKS)]
+            if parsed and rejection_reason in {"ungrounded_numeric_value", "ungrounded_timestamp"} and correction_lock.acquire(blocking=False):
                 correction = (
                     prompt + "\nCORRECTION REQUIRED: one numeric or timestamp claim was not grounded. Rewrite from scratch. "
                     "For each numeric sensor claim, use its exact tag, metric, compatible unit, and meaning from one numeric_facts record. "
@@ -1411,20 +2008,37 @@ def answer_incident_question(
                     "Omit unsupported or ambiguous numeric/time claims; do not estimate."
                 )
                 try:
-                    parsed = _parse_llm_payload(invoke_provider(correction, "correction"))
+                    correction_started = perf_counter()
+                    correction_raw = invoke_provider(correction, "correction")
+                    parsed = _parse_llm_payload(correction_raw)
+                    correction_inference_ms = round((perf_counter() - correction_started) * 1000, 3)
+                    provider_attempts[-1]["parse_result"] = "valid_json" if parsed else "invalid_response_schema"
+                    validation_started = perf_counter()
                     rejection_reason = (
                         _llm_answer_rejection_reason(parsed["answer"], grounded, compact, wants_procedure)
                         if parsed else "malformed_or_ungrounded_llm_output"
                     )
+                    validation_elapsed = (perf_counter() - validation_started) * 1000
+                    grounding_validation_ms = (grounding_validation_ms or 0.0) + validation_elapsed
+                    grounding_validation_result = "passed" if rejection_reason is None else "rejected"
+                    validation_rejection_reason = rejection_reason
+                    provider_attempts[-1]["grounding_result"] = grounding_validation_result
+                    provider_attempts[-1]["validation_rejection_reason"] = rejection_reason
                     logger.info(
-                        "assistant_provider_output request_id=%s call_type=correction output_used=%s reason=%s",
-                        provider_request_id, rejection_reason is None, rejection_reason or "none",
+                        "assistant_provider_output request_id=%s incident_id=%s call_type=correction parse_result=%s grounding_result=%s validation_rejection_reason=%s",
+                        provider_request_id, event.get("event_id") or "unknown",
+                        provider_attempts[-1]["parse_result"], grounding_validation_result,
+                        rejection_reason or "none",
                     )
                 except Exception as exc:
                     # Preserve why the draft was rejected as the fallback cause;
                     # report the failed repair separately for useful diagnostics.
                     correction_failure_reason = getattr(exc, "kind", None) or "llm_unavailable"
                     logger.warning("[Assistant] Grounding correction request failed (%s)", correction_failure_reason)
+                finally:
+                    correction_lock.release()
+            elif parsed and rejection_reason in {"ungrounded_numeric_value", "ungrounded_timestamp"}:
+                correction_failure_reason = "correction_in_flight_for_incident"
             if parsed and rejection_reason is None:
                 accepted_llm_answer = parsed["answer"]
                 # The model may rephrase facts; deterministic confidence and
@@ -1448,6 +2062,15 @@ def answer_incident_question(
     generation_latency_ms = round((perf_counter() - generation_started) * 1000, 3)
     grounded["assembly_latency_ms"] = round(float(assembly_latency_ms or (context or {}).get("assembly_latency_ms") or 0.0), 3)
     grounded["generation_latency_ms"] = generation_latency_ms
+    grounded["timings_ms"] = {
+        **(grounded.get("timings_ms") or {}),
+        **((context or {}).get("timings_ms") or {}),
+        "context_assembly": grounded["assembly_latency_ms"],
+        "initial_llm_inference": initial_inference_ms,
+        "grounding_validation": round(grounding_validation_ms, 3) if grounding_validation_ms is not None else None,
+        "correction_inference": correction_inference_ms,
+        "total_analysis": round((perf_counter() - started) * 1000 + grounded["assembly_latency_ms"], 3),
+    }
     grounded["total_latency_ms"] = round((perf_counter() - started) * 1000 + grounded["assembly_latency_ms"], 3)
     grounded["fallback_reason"] = fallback_reason
     # Keep the correction request outcome directly available to API consumers;
@@ -1456,12 +2079,44 @@ def answer_incident_question(
     grounded["correction_failure_reason"] = correction_failure_reason
     grounded["llm_used"] = used_llm
     operator_response = grounded.get("operator_response") or _operator_response(event, grounded)
+    # build_assistant_response preserves a question-specific deterministic
+    # answer before formatting the legacy structured report. Keep that answer
+    # for the operator panel when the LLM is unavailable or rejected.
+    question_answer = accepted_llm_answer or grounded.get("question_answer") or grounded.get("answer")
     if accepted_llm_answer:
         operator_response["bottom_line"] = accepted_llm_answer
-        if parsed.get("immediate_checks"):
+        if grounded.get("has_approved_sop") and parsed.get("immediate_checks"):
             operator_response["recommended_checks"] = parsed["immediate_checks"][:3]
     grounded["operator_response"] = operator_response
+    # Keep the operator summary consistent with the resolved source state even
+    # when the model rephrased the bottom line without mentioning the limitation.
+    resolution = grounded.get("sop_resolution") or {}
+    grounded["has_approved_sop"] = bool(resolution.get("approved") and grounded.get("sources"))
+    if resolution.get("status") in ("retrieval_unavailable", "not_retrieved", "document_not_found", "document_content_unavailable"):
+        grounded["sources"] = []
+    if grounded.get("sources") and re.search(
+        r"\b(?:no|not|unavailable|could not be found|wasn't retrieved|not in the current records)\b.{0,60}\b(?:relevant\s+)?(?:SOP|procedure|section)\b|\b(?:SOP|procedure|section)\b.{0,60}\b(?:unavailable|not available|not retrieved|could not be found|not in the current records)\b",
+        operator_response.get("bottom_line") or "", re.IGNORECASE,
+    ):
+        if resolution.get("approved") is True:
+            operator_response["bottom_line"] = f"A retrieved step in {resolution.get('sop_id')} is available and its approval is verified; see the referenced step below."
+        else:
+            operator_response["bottom_line"] = f"A matching step in {resolution.get('sop_id')} was retrieved, but its approval status is not verified; OpsLens cannot present it as approved guidance."
+    if resolution.get("status") in ("retrieval_unavailable", "not_retrieved", "document_not_found", "document_content_unavailable"):
+        operator_response["data_limitations"] = list(dict.fromkeys(
+            (operator_response.get("data_limitations") or []) + [resolution.get("message", "SOP content unavailable.")]
+        ))
+    elif resolution.get("status") == "reference_unapproved":
+        operator_response["data_limitations"] = list(dict.fromkeys(
+            (operator_response.get("data_limitations") or []) + ["Retrieved SOP step approval status is not verified; it was not supplied as approved instructions to the model."]
+        ))
+    structured = _structured_assessment(event, grounded, operator_response)
+    grounded.update(structured)
+    operator_response.update(structured)
     grounded["answer"] = _render_operator_answer(operator_response)
+    # Keep the response to the operator's actual question separate from the
+    # concise assessment summary used by legacy clients.
+    grounded["question_answer"] = question_answer
     grounded["selected_provider"] = selected_provider_name
     grounded["selected_model"] = selected_model
     grounded["used_provider"] = used_provider
@@ -1478,11 +2133,16 @@ def answer_incident_question(
         "correction_failure_reason": correction_failure_reason,
     }
     grounded["compact_context"] = compact
+    final_http_status = next((item.get("http_status") for item in reversed(provider_attempts) if item.get("http_status") is not None), None)
     logger.info(
-        "assistant_response event_id=%s selected_provider=%s model=%s generated_by=%s fallback_used=%s fallback_reason=%s latency_ms=%.3f",
-        event.get("event_id") or "unknown", selected_provider_name, selected_model or "none",
-        used_provider, grounded["fallback_used"], fallback_reason or "none",
-        grounded["generation_latency_ms"],
+        "assistant_request_complete request_id=%s incident_id=%s provider=%s model=%s provider_attempted=%s request_latency_ms=%.3f provider_http_status=%s response_received=%s parse_result=%s grounding_result=%s validation_rejection_reason=%s fallback_selected=%s fallback_reason=%s",
+        provider_request_id, event.get("event_id") or "unknown", selected_provider_name,
+        selected_model or "none", bool(provider_attempts), grounded["generation_latency_ms"],
+        final_http_status or "none",
+        any(item.get("response_received") for item in provider_attempts),
+        provider_attempts[-1].get("parse_result", "not_run") if provider_attempts else "not_attempted",
+        grounding_validation_result, validation_rejection_reason or "none",
+        grounded["fallback_used"], fallback_reason or "none",
     )
     return grounded
 

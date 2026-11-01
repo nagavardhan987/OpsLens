@@ -19,6 +19,7 @@ import json
 import re
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
@@ -26,11 +27,14 @@ from datetime import datetime, timezone
 from models import EventStory, Evidence, SopMatch
 from database import Database
 from embed_index import load_all_sops, SOP_DIR
+from tag_registry import get_tag_entry
 
 logger = logging.getLogger("opslens.sop_retriever")
 
 _EMBED_MODEL = None
 _QDRANT_STORE = None
+_QDRANT_LAST_INIT_ATTEMPT = 0.0
+_QDRANT_RETRY_INTERVAL_SECONDS = 5.0
 _BM25_INDEX = None
 _BM25_SOPS = None
 
@@ -49,15 +53,29 @@ def get_embed_model():
 
 
 def get_qdrant_store():
-    global _QDRANT_STORE
-    if _QDRANT_STORE is None:
+    global _QDRANT_STORE, _QDRANT_LAST_INIT_ATTEMPT
+    now = time.monotonic()
+    needs_init = _QDRANT_STORE is None
+    if not needs_init:
+        try:
+            offline = not _QDRANT_STORE.health().get("connected")
+        except Exception:
+            offline = True
+        needs_init = offline and now - _QDRANT_LAST_INIT_ATTEMPT >= _QDRANT_RETRY_INTERVAL_SECONDS
+    if needs_init:
         from vector_store.qdrant_store import QdrantVectorStore
+        _QDRANT_LAST_INIT_ATTEMPT = now
         _QDRANT_STORE = QdrantVectorStore()
-        # Auto-ingest SOPs if Qdrant is empty
-        if _QDRANT_STORE.count() == 0:
+        # Auto-ingest bundled SOPs only after confirming the existing service
+        # and collection are reachable. count()==0 also describes an offline
+        # client, and attempting writes in that state obscured the real outage.
+        health = _QDRANT_STORE.health()
+        if health.get("connected") and _QDRANT_STORE.count() == 0:
             logger.info("[SopRetriever] Qdrant is empty. Auto-ingesting SOPs...")
             from ingest_sops import ingest
             ingest(vector_store=_QDRANT_STORE)
+        elif not health.get("connected"):
+            logger.warning("[SopRetriever] Qdrant unavailable; preserving service state and relying on the configured retrieval fallback.")
     return _QDRANT_STORE
 
 
@@ -66,7 +84,60 @@ def get_bm25_fallback():
     if _BM25_INDEX is None:
         from embed_index import format_sop_for_indexing
         from rank_bm25 import BM25Okapi
-        _BM25_SOPS = load_all_sops(SOP_DIR)
+        _BM25_SOPS = []
+        for sop in load_all_sops(SOP_DIR):
+            pages = sop.get("content_pages") or []
+            if pages:
+                for page in pages:
+                    page_text = str(page.get("text") or "").strip()
+                    if not page_text:
+                        continue
+                    page_ids = re.findall(r"SOP-[A-Z]{3}-\d{3}", page_text)
+                    _BM25_SOPS.append({
+                        **sop,
+                        "steps": [page_text],
+                        "page": page.get("page"),
+                        "section_title": page.get("section_title") or "Manual page",
+                        "keywords": list(dict.fromkeys([*(sop.get("keywords") or []), *page_ids])),
+                    })
+            else:
+                _BM25_SOPS.append(sop)
+
+        # Uploaded PDFs are searchable while Qdrant is unavailable. Keep each
+        # page as a separate passage so the citation retains its source page.
+        try:
+            from pdf_sop_ingestion import PDF_DIR, get_pdf_path, _chunk_page
+            import fitz
+            indexed_document_ids = {str(item.get("document_id") or "") for item in _BM25_SOPS}
+            for metadata_path in PDF_DIR.glob("*.json") if PDF_DIR.exists() else []:
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    document_id = str(metadata.get("document_id") or "")
+                    if document_id and document_id in indexed_document_ids:
+                        continue
+                    pdf_path = get_pdf_path(metadata["sop_id"], metadata.get("revision", ""), metadata.get("sha256", ""))
+                    with fitz.open(pdf_path) as pdf:
+                        for page_number, page in enumerate(pdf, start=1):
+                            text = page.get_text("text").strip()
+                            for chunk_index, chunk in enumerate(_chunk_page(text), start=1):
+                                ids = re.findall(r"SOP-[A-Z]{3}-\d{3}", chunk)
+                                heading = next((line.strip() for line in chunk.splitlines() if line.strip()), f"Page {page_number}")
+                                _BM25_SOPS.append({
+                                    **metadata,
+                                    "sop_id": metadata["sop_id"],
+                                    "document_id": document_id or metadata["sop_id"],
+                                    "title": metadata.get("title") or metadata["sop_id"],
+                                    "equipment_id": metadata.get("equipment") or "",
+                                    "equipment_type": metadata.get("equipment_type") or "",
+                                    "steps": [chunk],
+                                    "page": page_number,
+                                    "section_title": heading[:180],
+                                    "keywords": list(dict.fromkeys([*(metadata.get("keywords") or []), *ids])),
+                                })
+                except Exception as exc:
+                    logger.info("Local PDF page search unavailable for one document (%s)", type(exc).__name__)
+        except Exception as exc:
+            logger.info("Local PDF BM25 expansion unavailable (%s)", type(exc).__name__)
         corpus = [re.findall(r"[A-Za-z0-9_\-]+", format_sop_for_indexing(s).lower())
                   for s in _BM25_SOPS]
         _BM25_INDEX = BM25Okapi(corpus)
@@ -78,6 +149,9 @@ def _equipment_matches(document: Dict[str, Any], equipment: Optional[str]) -> bo
     if not equipment:
         return True
     document_equipment = str(document.get("equipment") or document.get("equipment_id") or "").strip()
+    if (str(document.get("equipment_type") or "").casefold() == "wastewater treatment"
+            and equipment.strip().casefold().startswith(("liftstation-", "inletworks-", "aerationbasin-", "tertiarytreatment-"))):
+        return True
     # Generic documents still need an explicit equipment match; otherwise a
     # semantically similar procedure can leak across unrelated assets.
     return document_equipment.casefold() == equipment.strip().casefold()
@@ -117,13 +191,10 @@ class SopRetriever:
         # Equipment
         equipment = None
         if evidence and evidence.likely_contributor_tag:
-            tag = evidence.likely_contributor_tag
-            if "P02" in tag or "FLW" in tag or "VLV" in tag or "PIT" in tag or "MOT" in tag:
-                equipment = "Pump-02"
-            elif "CMP" in tag:
-                equipment = "Compressor-01"
-            elif "TNK" in tag:
-                equipment = "Tank-01"
+            try:
+                equipment = get_tag_entry(evidence.likely_contributor_tag).equipment_id
+            except KeyError:
+                equipment = None
         if equipment:
             parts.append(f"Equipment: {equipment}")
 
@@ -229,6 +300,8 @@ class SopRetriever:
         raw_similarity = 0.0
         retrieved_chunks = []
         query_embedding = None
+        retrieval_status = "no_match"
+        retrieval_error = None
 
         try:
             if self.force_source == "bm25":
@@ -246,14 +319,15 @@ class SopRetriever:
             if not results:
                 raise RuntimeError("Qdrant returned no SOP chunks")
             if results:
-                # Group by sop_id, take best score per SOP
-                sop_scores: Dict[str, float] = {}
-                sop_chunks: Dict[str, List[Dict]] = {}
+                # Group by SOP revision when available so a revision's chunks
+                # and citation metadata are never mixed with another version.
+                sop_scores: Dict[tuple[str, str], float] = {}
                 for r in results:
                     sid = r.sop_id
-                    if sid not in sop_scores or r.similarity > sop_scores[sid]:
-                        sop_scores[sid] = r.similarity
-                    sop_chunks.setdefault(sid, []).append(r.to_dict())
+                    doc_id = str(r.payload.get("document_id") or sid)
+                    version_key = (sid, doc_id)
+                    if version_key not in sop_scores or r.similarity > sop_scores[version_key]:
+                        sop_scores[version_key] = r.similarity
                     candidates_log.append({
                         "sop_id": sid,
                         "chunk_id": r.chunk_id,
@@ -262,12 +336,18 @@ class SopRetriever:
                         "text_preview": r.text[:120],
                     })
 
-                best_sop_id = max(sop_scores, key=sop_scores.get)
-                raw_similarity = sop_scores[best_sop_id]
-                retrieved_chunks = [r.to_dict() for r in results if r.sop_id == best_sop_id]
+                best_sop_id, best_document_id = max(sop_scores, key=sop_scores.get)
+                raw_similarity = sop_scores[(best_sop_id, best_document_id)]
+                retrieved_chunks = [r.to_dict() for r in results
+                                    if r.sop_id == best_sop_id
+                                    and str(r.payload.get("document_id") or r.sop_id) == best_document_id]
+                retrieval_status = "match_found" if retrieved_chunks else "no_match"
 
                 # Get full SOP doc for steps
-                full_sop = qdrant.get_document(best_sop_id)
+                try:
+                    full_sop = qdrant.get_document(best_sop_id, document_id=best_document_id)
+                except TypeError:
+                    full_sop = qdrant.get_document(best_sop_id)
                 selected = next(r for r in results if r.sop_id == best_sop_id)
                 sop_title = selected.payload.get("title", "Unknown SOP")
                 steps = full_sop.get("steps", []) if full_sop else []
@@ -298,13 +378,34 @@ class SopRetriever:
                         sop_title = best_sop.get("title", "Unknown SOP")
                         steps = best_sop.get("steps", [])
                         equipment_matched = best_sop.get("equipment_id", "")
-                        retrieved_chunks = [{"text": s, "section": "step", "sop_id": best_sop_id} for s in steps[:5]]
+                        retrieved_chunks = [
+                            {
+                                "text": s,
+                                "section": f"Step {idx}",
+                                "sop_id": best_sop_id,
+                                "document_id": best_sop.get("document_id") or best_sop_id,
+                                "step_number": idx,
+                                "step_title": best_sop.get("section_title") or f"Step {idx}",
+                                "title": best_sop.get("title"),
+                                "revision": best_sop.get("revision"),
+                                "page": best_sop.get("page"),
+                                "source_pdf": best_sop.get("source_pdf"),
+                                "document_status": best_sop.get("document_status"),
+                                "approval_status": best_sop.get("approval_status", "unverified"),
+                                "approved": best_sop.get("approved") is True,
+                            }
+                            for idx, s in enumerate(steps[:1], start=1)
+                        ]
+                        retrieval_status = "match_found" if retrieved_chunks else "no_match"
                 else:
                     best_sop_id, sop_title, steps, equipment_matched = "SOP-NONE", "No relevant SOP found", [], ""
                     retrieved_chunks = []
+                    retrieval_status = "no_match"
             except Exception as e2:
-                logger.error(f"[SopRetriever] BM25 also failed: {e2}")
+                logger.error("[SopRetriever] BM25 retrieval unavailable (%s)", type(e2).__name__)
                 best_sop_id, sop_title, steps, equipment_matched = "SOP-NONE", "No SOP Found", [], ""
+                retrieval_status = "unavailable"
+                retrieval_error = "retrieval_unavailable"
 
         # Build why_retrieved
         symptoms = []
@@ -322,6 +423,7 @@ class SopRetriever:
             "keyword_score": raw_similarity if retrieval_method == "bm25" else None,
             "retrieval_method": retrieval_method,
             "embedding_model": "all-MiniLM-L6-v2",
+            "retrieval_status": retrieval_status,
         }
 
         # Build rag_trace for debug endpoint
@@ -338,6 +440,7 @@ class SopRetriever:
             "keyword_score": raw_similarity if retrieval_method == "bm25" else None,
             "retrieved_chunks": retrieved_chunks,
             "process_context": telemetry_snapshot or {},
+            "retrieval_status": retrieval_status,
         }
         RAG_TRACE_STORE[event_id] = rag_trace
 
@@ -353,11 +456,14 @@ class SopRetriever:
             embedding_model="all-MiniLM-L6-v2",
             query_context=query_context,
             steps=steps,
-            source="embedding" if retrieval_method == "qdrant_vector_search" else "bm25",
+            source=("unavailable" if retrieval_status == "unavailable" else
+                    "embedding" if retrieval_method == "qdrant_vector_search" else "bm25"),
             why_retrieved=why_retrieved,
             retrieved_chunks=retrieved_chunks,
             chunks=retrieved_chunks,
             rag_trace=rag_trace,
+            retrieval_status=retrieval_status,
+            retrieval_error=retrieval_error,
         )
 
         if persist and self.db:

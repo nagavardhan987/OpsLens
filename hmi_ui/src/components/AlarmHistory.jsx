@@ -2,9 +2,9 @@ import React from 'react';
 import { AlertTriangle, Clock3, RefreshCw } from 'lucide-react';
 
 const BAND_STYLES = {
-  URGENT:   'bg-red-500/15 text-red-300',
-  ELEVATED: 'bg-amber-500/15 text-amber-300',
-  ROUTINE:  'bg-slate-700/40 text-slate-400',
+  URGENT:   'bg-[#FEF3F2] text-[#D92D20] border border-[#D92D20]/30',
+  ELEVATED: 'bg-[#FEF0C7] text-[#B7791F] border border-[#B7791F]/30',
+  ROUTINE:  'bg-[#E8F5EC] text-[#006B35] border border-[#009530]/30',
 };
 
 function formatSourceTimestamp(value) {
@@ -17,26 +17,24 @@ function formatSourceTimestamp(value) {
   }).format(timestamp);
 }
 
-export default function AlarmHistory({ events = [], loading = false, onSelectEvent }) {
+export default function AlarmHistory({ events = [], loading = false, error = '', onSelectEvent }) {
   return (
-    <section className="rounded-xl border border-[#1a2535] bg-[#0d1420] overflow-hidden">
-      <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-[#1a2535]">
+    <section className="rounded-xl border border-[#D8E2DA] bg-white overflow-hidden shadow-sm">
+      <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-[#D8E2DA] bg-[#F3F6F3]">
         <div>
-          <div className="text-[10px] font-mono uppercase tracking-widest text-blue-400">Operator Log</div>
-          <h2 className="text-sm font-bold text-white mt-0.5">Recent alarms and incidents</h2>
-          <p className="text-[10px] text-slate-500 mt-0.5">All incidents from this session · across all equipment</p>
+          <h2 className="text-sm font-bold text-[#26352C]">Incident history</h2>
         </div>
-        <span className="text-[10px] font-mono text-slate-500">Local OpsLens event history</span>
       </div>
-      {loading && <p className="px-5 py-4 text-xs text-slate-500">Loading event history…</p>}
-      {!loading && events.length === 0 && (
+      {loading && <p className="px-5 py-4 text-xs text-[#64736A]">Loading event history…</p>}
+      {!loading && error && <p className="px-5 py-4 text-xs text-[#D92D20]" role="alert">{error}</p>}
+      {!loading && !error && events.length === 0 && (
         <div className="px-5 py-8 text-center">
-          <Clock3 className="w-5 h-5 text-slate-600 mx-auto mb-2" />
-          <p className="text-xs text-slate-400">No recorded alarms yet. The operator screen is monitoring for the next event.</p>
+          <Clock3 className="w-5 h-5 text-[#64736A] mx-auto mb-2" />
+          <p className="text-xs text-[#64736A]">No recorded alarms yet. The operator screen is monitoring for the next event.</p>
         </div>
       )}
       {events.length > 0 && (
-        <div className="divide-y divide-[#1a2535]">
+        <div className="divide-y divide-[#D8E2DA]">
           {events.map((event) => {
             const band = event.urgency_band;
             const bandStyle = BAND_STYLES[band];
@@ -46,15 +44,15 @@ export default function AlarmHistory({ events = [], loading = false, onSelectEve
                 key={event.event_id}
                 type="button"
                 onClick={() => onSelectEvent?.(event.event_id)}
-                className="w-full text-left px-5 py-3 hover:bg-[#111a28] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="w-full text-left px-5 py-3 hover:bg-[#F3F6F3] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#009530] cursor-pointer"
               >
                 <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-2">
                   <div className="flex min-w-0 items-start gap-3">
-                    <AlertTriangle className={`mt-0.5 w-4 h-4 shrink-0 ${event.is_open ? 'text-red-400' : 'text-slate-500'}`} />
+                    <AlertTriangle className={`mt-0.5 w-4 h-4 shrink-0 ${event.is_open ? 'text-[#D92D20]' : 'text-[#64736A]'}`} />
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-mono text-xs font-bold text-slate-100">{event.alarm_id || 'Alarm ID unavailable'}</span>
-                        <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${event.is_open ? 'bg-red-500/10 text-red-300' : 'bg-slate-800 text-slate-400'}`}>
+                        <span className="font-mono text-xs font-bold text-[#26352C]">{event.alarm_id || 'Alarm ID unavailable'}</span>
+                        <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${event.is_open ? 'bg-[#FEF3F2] text-[#D92D20] border border-[#D92D20]/30' : 'bg-[#F3F6F3] text-[#64736A] border border-[#D8E2DA]'}`}>
                           {event.status || 'Status unavailable'}
                         </span>
                         {band && bandStyle && (
@@ -63,16 +61,16 @@ export default function AlarmHistory({ events = [], loading = false, onSelectEve
                           </span>
                         )}
                         {repeatCount > 1 && (
-                          <span className="inline-flex items-center gap-0.5 rounded bg-orange-900/30 px-1.5 py-0.5 text-[9px] font-bold text-orange-400">
+                          <span className="inline-flex items-center gap-0.5 rounded bg-[#FEF0C7] border border-[#B7791F]/30 px-1.5 py-0.5 text-[9px] font-bold text-[#B7791F]">
                             <RefreshCw size={8} />×{repeatCount}
                           </span>
                         )}
-                        <span className="text-[10px] text-slate-500">Source severity: {event.alarm_severity || 'not supplied'}</span>
+                        {event.alarm_severity && <span className="text-[10px] text-[#64736A]">Severity: {event.alarm_severity}</span>}
                       </div>
-                      <p className="mt-1 text-xs text-slate-400 truncate">{event.causal_label || event.description || 'Event details unavailable'}</p>
+                      <p className="mt-1 text-xs text-[#26352C] truncate">{event.description || event.primary_tag || 'Recorded alarm'}</p>
                     </div>
                   </div>
-                  <div className="text-right text-[10px] text-slate-500">
+                  <div className="text-right text-[10px] text-[#64736A]">
                     <div>{event.equipment || 'Equipment unavailable'}</div>
                     <time dateTime={event.timestamp || undefined}>{formatSourceTimestamp(event.timestamp)}</time>
                   </div>

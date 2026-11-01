@@ -8,6 +8,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import threading
+import time
 from contextvars import ContextVar, Token
 from time import perf_counter
 from typing import Any, Dict, Iterator, Optional
@@ -17,10 +20,15 @@ import requests
 from edge_slm import call_inprocess_slm, call_local_edge_slm
 
 logger = logging.getLogger("opslens.llm_provider")
+_PROVIDER_CONCURRENCY = max(1, int(os.environ.get("OPSLENS_LLM_MAX_CONCURRENCY", "3")))
+_PROVIDER_SLOTS = threading.BoundedSemaphore(_PROVIDER_CONCURRENCY)
 
 _verified_provider: Optional[tuple[str, str]] = None
 _provider_request_context: ContextVar[tuple[str, str]] = ContextVar(
     "opslens_provider_request_context", default=("untracked", "inference")
+)
+_provider_http_status: ContextVar[Optional[int]] = ContextVar(
+    "opslens_provider_http_status", default=None
 )
 
 
@@ -31,6 +39,19 @@ def set_provider_request_context(request_id: str, call_type: str) -> Token:
 
 def reset_provider_request_context(token: Token) -> None:
     _provider_request_context.reset(token)
+    _provider_http_status.set(None)
+
+
+def clear_provider_http_status() -> None:
+    _provider_http_status.set(None)
+
+
+def get_provider_http_status() -> Optional[int]:
+    return _provider_http_status.get()
+
+
+def _record_provider_http_status(status_code: int) -> None:
+    _provider_http_status.set(int(status_code))
 
 
 class ProviderError(RuntimeError):
@@ -48,7 +69,9 @@ def selected_provider() -> str:
 
 
 def llm_timeout() -> float:
-    return float(os.environ.get("OPSLENS_LLM_TIMEOUT") or os.environ.get("EDGE_LLM_TIMEOUT") or "8.0")
+    # Bound slow inference so the assistant can move to its verified deterministic
+    # response promptly. Deployments can raise/lower this via environment config.
+    return float(os.environ.get("OPSLENS_LLM_TIMEOUT") or os.environ.get("EDGE_LLM_TIMEOUT") or "4.0")
 
 
 def llm_model(provider: Optional[str] = None) -> str:
@@ -129,24 +152,30 @@ def complete_chat(prompt: str, timeout: Optional[float] = None) -> str:
     req_timeout = timeout or llm_timeout()
     started = perf_counter()
     try:
-        if provider == "gemini":
-            text = _call_gemini(prompt, req_timeout)
-        elif provider == "groq":
-            text = _call_groq(prompt, req_timeout)
-        elif provider == "openai":
-            text = _call_openai(prompt, req_timeout)
-        elif provider == "anthropic":
-            text = _call_anthropic(prompt, req_timeout)
-        elif provider in ("ollama", "openai_compatible"):
-            text = call_local_edge_slm(prompt, timeout=req_timeout)
-            if not text:
-                raise ProviderError("unavailable", "Local edge SLM did not return a response.")
-        elif provider in ("transformers", "inprocess", "local_cpu"):
-            text = call_inprocess_slm(prompt)
-            if not text:
-                raise ProviderError("unavailable", "In-process SLM did not return a response.")
-        else:
-            raise ProviderError("configuration", f"Unknown OPSLENS_LLM_PROVIDER '{provider}'.")
+        slot_wait = max(0.0, float(os.environ.get("OPSLENS_LLM_QUEUE_TIMEOUT", "0.25")))
+        if not _PROVIDER_SLOTS.acquire(timeout=slot_wait):
+            raise ProviderError("busy", "LLM concurrency limit reached.")
+        try:
+            if provider == "gemini":
+                text = _call_gemini(prompt, req_timeout)
+            elif provider == "groq":
+                text = _call_groq(prompt, req_timeout)
+            elif provider == "openai":
+                text = _call_openai(prompt, req_timeout)
+            elif provider == "anthropic":
+                text = _call_anthropic(prompt, req_timeout)
+            elif provider in ("ollama", "openai_compatible"):
+                text = call_local_edge_slm(prompt, timeout=req_timeout)
+                if not text:
+                    raise ProviderError("unavailable", "Local edge SLM did not return a response.")
+            elif provider in ("transformers", "inprocess", "local_cpu"):
+                text = call_inprocess_slm(prompt)
+                if not text:
+                    raise ProviderError("unavailable", "In-process SLM did not return a response.")
+            else:
+                raise ProviderError("configuration", f"Unknown OPSLENS_LLM_PROVIDER '{provider}'.")
+        finally:
+            _PROVIDER_SLOTS.release()
     except ProviderError as exc:
         logger.warning(
             "provider_inference provider=%s model=%s result=failed reason=%s http_status=%s elapsed_ms=%.3f",
@@ -264,6 +293,7 @@ def _call_gemini(prompt: str, timeout: float) -> str:
         "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
     }
     resp = requests.post(url, headers={"x-goog-api-key": api_key, "Content-Type": "application/json"}, json=payload, timeout=timeout)
+    _record_provider_http_status(resp.status_code)
     _auth_failure(resp.status_code, "gemini")
     data = resp.json()
     parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
@@ -284,6 +314,7 @@ def _call_openai(prompt: str, timeout: float) -> str:
         json=payload,
         timeout=timeout,
     )
+    _record_provider_http_status(resp.status_code)
     _auth_failure(resp.status_code, "openai")
     choices = resp.json().get("choices") or []
     return ((choices[0].get("message") or {}).get("content") if choices else "") or ""
@@ -319,23 +350,36 @@ def _call_groq(prompt: str, timeout: float) -> str:
         )
         raise
     elapsed = (perf_counter() - started) * 1000
+    _record_provider_http_status(resp.status_code)
     logger.info(
         "provider_request request_id=%s call_type=%s provider=groq model=%s result=http_response http_status=%s elapsed_ms=%.3f",
         request_id, call_type, payload["model"], resp.status_code, elapsed,
     )
     if resp.status_code == 429:
-        import time
-        logger.warning("provider_request request_id=%s groq_rate_limited retrying_after_backoff", request_id)
-        time.sleep(1.2)
+        # Quota exhaustion is terminal until the account/limits change. For a
+        # transient window limit, make at most one short retry and honor the
+        # provider's delay only when it fits the configured latency budget.
+        max_wait = max(0.0, float(os.environ.get("OPSLENS_GROQ_MAX_RETRY_WAIT", "0.5")))
+        body_text = ""
         try:
+            body_text = json.dumps(resp.json()).lower()
+        except Exception:
+            pass
+        retry_after = _groq_retry_after(resp.headers or {})
+        if "insufficient_quota" not in body_text and max_wait > 0 and (retry_after is None or retry_after <= max_wait):
+            delay = min(max_wait, retry_after if retry_after is not None else 0.2 * (2 ** 0) + random.uniform(0.0, 0.15))
+            logger.warning("provider_request request_id=%s groq_rate_limited retrying_once delay_ms=%.1f", request_id, delay * 1000)
+            time.sleep(delay)
             resp = requests.post(
                 endpoint,
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json=payload,
                 timeout=timeout,
             )
-        except Exception:
-            pass
+            _record_provider_http_status(resp.status_code)
+        else:
+            logger.warning("provider_request request_id=%s groq_rate_limited retry_skipped reason=%s", request_id,
+                           "quota_exhausted" if "insufficient_quota" in body_text else "retry_after_exceeds_budget")
     _auth_failure(resp.status_code, "groq")
     try:
         data = resp.json()
@@ -355,6 +399,24 @@ def _call_groq(prompt: str, timeout: float) -> str:
     if not isinstance(content, str) or not content.strip():
         raise ProviderError("malformed_response", "groq returned no text content in its chat-completion response.", resp.status_code)
     return content
+
+
+def _groq_retry_after(headers: Dict[str, Any]) -> Optional[float]:
+    """Read common Groq/OpenAI-compatible rate-limit timing headers."""
+    for name in ("retry-after", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"):
+        value = headers.get(name) or headers.get(name.title())
+        if value is None:
+            continue
+        text = str(value).strip().lower()
+        try:
+            if text.endswith("ms"):
+                return max(0.0, float(text[:-2]) / 1000)
+            if text.endswith("s"):
+                return max(0.0, float(text[:-1]))
+            return max(0.0, float(text))
+        except ValueError:
+            continue
+    return None
 
 
 def _stream_openai_compatible(prompt: str, provider: str, timeout: float) -> Iterator[str]:
@@ -414,6 +476,7 @@ def _call_anthropic(prompt: str, timeout: float) -> str:
         json=payload,
         timeout=timeout,
     )
+    _record_provider_http_status(resp.status_code)
     _auth_failure(resp.status_code, "anthropic")
     content = resp.json().get("content") or []
     return (content[0].get("text") if content else "") or ""

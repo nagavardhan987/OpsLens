@@ -11,6 +11,9 @@ function formatTimestamp(value) {
 }
 
 const defaultScenarios = [
+  { scenario_id: 'wet_well_high_level', name: 'Lift Station — Wet-Well High-High Level' },
+  { scenario_id: 'screen_differential_pressure', name: 'Inlet Works — Screen Differential Pressure High' },
+  { scenario_id: 'low_do_ammonia_rise', name: 'Aeration — Low DO / Ammonia Rise' },
   { scenario_id: 'valve_restriction', name: 'Pump-02 — Valve Restriction' },
   { scenario_id: 'bearing_wear', name: 'Compressor-01 — Bearing Wear' },
   { scenario_id: 'seal_leak', name: 'Pump-02 — Seal Leak' },
@@ -37,56 +40,57 @@ export default function ScenarioLab({
 }) {
   const [error, setError] = useState('');
   const choices = scenarios.length ? scenarios : defaultScenarios;
+  const recoverySupported = ['valve_restriction', 'valve_restriction_cascade', 'scenario_a'].includes(simulationStatus.scenario_id);
 
   const start = async () => {
     setError('');
     const started = await onStart();
-    if (!started) setError('The scenario could not be started. Check that the OpsLens API is running, then try again.');
+    if (!started) setError('Scenario could not be started. Try again.');
   };
 
   return (
     <main className="flex-1 px-6 py-8 max-w-5xl w-full mx-auto space-y-6">
       <header>
-        <p className="text-xs font-mono uppercase tracking-[0.22em] text-emerald-400">DEMO & SIMULATION</p>
-        <h1 className="mt-2 text-3xl font-bold text-white">Scenario Lab</h1>
-        <p className="mt-2 text-slate-400">Run synthetic scenarios for demonstrations and observe the resulting alarm on the HMI dashboard.</p>
+        <p className="text-xs font-mono uppercase tracking-[0.22em] text-[#009530] font-bold">DEMO & SIMULATION</p>
+        <h1 className="mt-2 text-3xl font-bold text-[#26352C]">Scenario Lab</h1>
+        <p className="mt-2 text-[#64736A]">Run wastewater process scenarios and review the resulting alarm on the Operator HMI.</p>
       </header>
 
-      <section className="rounded-2xl border border-[#1a2535] bg-[#0d1420] p-6 space-y-5">
-        <label className="block text-sm font-semibold text-slate-200" htmlFor="scenario-select">Scenario</label>
-        <select id="scenario-select" value={selectedScenario} onChange={(e) => onSelectScenario(e.target.value)} disabled={simulating || isIncident} className="w-full h-12 px-4 rounded-lg bg-[#080d15] border border-[#29374a] text-slate-100 focus:outline-none focus:border-emerald-500 disabled:opacity-50">
+      <section className="rounded-2xl border border-[#D8E2DA] bg-white p-6 space-y-5 shadow-sm">
+        <label className="block text-sm font-semibold text-[#26352C]" htmlFor="scenario-select">Scenario</label>
+        <select id="scenario-select" value={selectedScenario} onChange={(e) => onSelectScenario(e.target.value)} disabled={simulating || isIncident} className="w-full h-12 px-4 rounded-lg bg-white border border-[#D8E2DA] text-[#26352C] focus:outline-none focus:border-[#009530] disabled:opacity-50">
           {choices.map((scenario) => <option key={scenario.scenario_id} value={scenario.scenario_id}>{scenario.name || scenario.scenario_id}</option>)}
         </select>
 
         <div className="flex flex-wrap items-center gap-3">
-          <button onClick={start} disabled={simulating || isIncident} className="ml-auto h-11 px-5 rounded-lg bg-red-600 hover:bg-red-500 disabled:bg-slate-700 disabled:text-slate-400 text-white font-bold text-sm flex items-center gap-2">
+          <button onClick={start} disabled={simulating || isIncident} className="ml-auto h-11 px-5 rounded-lg bg-[#009530] hover:bg-[#006B35] disabled:bg-[#E8ECE8] disabled:text-[#64736A] text-white font-bold text-sm flex items-center gap-2 cursor-pointer transition-colors shadow-sm">
             <Play className="w-4 h-4 fill-current" /> {simulating ? 'SCENARIO RUNNING' : isIncident ? 'OPEN INCIDENT ACTIVE' : 'START SCENARIO'}
           </button>
         </div>
-        {simulating && <div className="flex items-center gap-2 text-sm text-blue-300"><Zap className="w-4 h-4 animate-pulse" /> Scenario accepted. Waiting for the event pipeline; the HMI dashboard will update when the incident is published.</div>}
+        {simulating && <div className="flex items-center gap-2 text-sm text-[#155EEF]"><Zap className="w-4 h-4 animate-pulse" /> Scenario accepted. Waiting for the event pipeline; the HMI dashboard will update when the incident is published.</div>}
         {simulationStatus.status === 'awaiting_corrective_action' && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 p-5 text-sm text-amber-100 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/20 pb-3">
+          <div className="rounded-lg border border-[#B7791F]/30 bg-[#FEF0C7] p-5 text-sm text-[#26352C] space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#B7791F]/20 pb-3">
               <div>
-                <p className="font-bold text-amber-200 text-base">
+                <p className="font-bold text-[#B7791F] text-base">
                   Synthetic alarm active · {simulationStatus.equipment_id || 'Equipment'}
                 </p>
-                <p className="text-xs text-amber-200/70 mt-0.5">
-                  Alarm ({simulationStatus.alarm_tag || 'Active trip'}) is active in the runtime engine.
+                <p className="text-xs text-[#805400] mt-0.5">
+                  Alarm input ({simulationStatus.alarm_tag || 'active trip'}) is active.
                 </p>
               </div>
               <div className="flex items-center gap-3 font-mono text-xs">
-                <span className="rounded bg-amber-900/50 border border-amber-500/40 px-2.5 py-1 text-amber-300 font-bold">
+                <span className="rounded bg-white border border-[#B7791F]/40 px-2.5 py-1 text-[#B7791F] font-bold">
                   Repeat Count: ×{simulationStatus.repeat_count || 1}
                 </span>
-                <span className="text-amber-200/60 text-[11px]">
+                <span className="text-[#805400] text-[11px]">
                   Last seen: {formatTimestamp(simulationStatus.last_seen_timestamp)}
                 </span>
               </div>
             </div>
 
-            <p className="text-xs text-amber-100/80 leading-relaxed">
-              The simulated fault sequence has finished. You can resend the identical active alarm notification to verify deterministic deduplication, or run simulated recovery to restore nominal conditions.
+            <p className="text-xs text-[#805400] leading-relaxed">
+              The simulated fault sequence has finished. You can resend the identical active alarm notification to verify deterministic deduplication. {recoverySupported ? 'A synthetic recovery trajectory is available for this scenario.' : 'No synthetic recovery trajectory is configured for this scenario; the source-clear interlock remains in place.'}
             </p>
 
             <div className="flex flex-wrap items-center gap-3 pt-1">
@@ -94,47 +98,47 @@ export default function ScenarioLab({
                 type="button"
                 onClick={onTriggerAlarmRepeat}
                 disabled={repeatBusy || recoveryBusy}
-                className="h-10 px-4 rounded-lg border border-amber-500/50 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-xs font-bold flex items-center gap-2 transition-colors disabled:opacity-50"
+                className="h-10 px-4 rounded-lg border border-[#B7791F]/50 bg-white hover:bg-[#FEF0C7] text-[#B7791F] text-xs font-bold flex items-center gap-2 transition-colors disabled:opacity-50 cursor-pointer"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${repeatBusy ? 'animate-spin' : ''}`} />
                 {repeatBusy ? 'SENDING NOTIFICATION…' : 'TRIGGER SAME ALARM AGAIN'}
               </button>
 
-              <button
+              {recoverySupported ? <button
                 type="button"
                 onClick={onSimulatedRecovery}
                 disabled={recoveryBusy || repeatBusy}
-                className="h-10 px-4 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold flex items-center gap-2 transition-colors disabled:opacity-50"
+                className="h-10 px-4 rounded-lg bg-[#009530] hover:bg-[#006B35] text-white text-xs font-bold flex items-center gap-2 transition-colors disabled:opacity-50 cursor-pointer shadow-sm"
               >
                 {recoveryBusy ? 'SIMULATING RECOVERY…' : 'RUN SIMULATED CORRECTIVE ACTION'}
-              </button>
+              </button> : <span className="rounded-md border border-[#D8E2DA] bg-[#F3F6F3] px-3 py-2 text-xs text-[#64736A]">Recovery simulation unavailable for this scenario</span>}
             </div>
 
-            {repeatError && <p role="alert" className="rounded-md border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-200">{repeatError}</p>}
+            {repeatError && <p role="alert" className="rounded-md border border-[#D92D20]/40 bg-[#FEF3F2] px-3 py-2 text-xs text-[#D92D20]">{repeatError}</p>}
 
-            <p className="text-[11px] text-amber-200/50 font-mono">
+            <p className="text-[11px] text-[#805400] font-mono">
               Deterministic deduplication: Resending will not create a new incident. Repeat count increments from stored fingerprint.
             </p>
           </div>
         )}
-        {simulationStatus.status === 'alarm_clear_observed' && <div role="status" className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-3 text-sm text-emerald-200">Synthetic recovery completed. Backend observed ALM-P02-HP clear at {simulationStatus.timestamp || 'a source timestamp'}. Open the HMI to review and confirm the outcome.</div>}
-        {simulationStatus.status === 'recovering' && <div className="text-sm text-emerald-300">Synthetic recovery readings are being generated…</div>}
-        {simulationStatus.status === 'error' && <div role="alert" className="text-sm text-red-300">The backend reported an error in the synthetic scenario. Check API logs before restarting.</div>}
-        {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
+        {simulationStatus.status === 'alarm_clear_observed' && <div role="status" className="rounded-lg border border-[#009530]/30 bg-[#E8F5EC] p-3 text-sm text-[#006B35]">Simulated recovery complete. Alarm input cleared at {simulationStatus.timestamp || 'the recorded time'}. Open the HMI to review and confirm.</div>}
+        {simulationStatus.status === 'recovering' && <div className="text-sm text-[#006B35]">Synthetic recovery readings are being generated…</div>}
+        {simulationStatus.status === 'error' && <div role="alert" className="text-sm text-[#D92D20]">Scenario could not be completed. Try again.</div>}
+        {error && <p role="alert" className="text-sm text-[#D92D20]">{error}</p>}
       </section>
 
-      <section className="rounded-xl border border-emerald-900/60 bg-emerald-950/20 p-4 flex gap-3 text-sm text-emerald-100">
-        <ShieldCheck className="w-5 h-5 shrink-0 text-emerald-400" />
-        <p><strong>Read-only simulation.</strong> Starting a scenario generates synthetic telemetry and an event for the OpsLens demo pipeline. It does not write to a PLC, pump, valve, actuator, or setpoint.</p>
+      <section className="rounded-xl border border-[#009530]/30 bg-[#E8F5EC] p-4 flex gap-3 text-sm text-[#006B35]">
+        <ShieldCheck className="w-5 h-5 shrink-0 text-[#009530]" />
+        <p><strong>Synthetic demo values.</strong> Reference ranges use a notional 50 MLD plant and are not approved site alarm limits.</p>
       </section>
 
-      <section className="rounded-xl border border-amber-700/40 bg-amber-950/20 p-4 flex flex-wrap items-center gap-4">
-        <AlertTriangle className="w-5 h-5 shrink-0 text-amber-400" />
+      <section className="rounded-xl border border-[#B7791F]/30 bg-[#FEF0C7] p-4 flex flex-wrap items-center gap-4">
+        <AlertTriangle className="w-5 h-5 shrink-0 text-[#B7791F]" />
         <div className="flex-1 min-w-[240px]">
-          <h2 className="text-sm font-semibold text-amber-200">Clear demo data</h2>
-          <p className="mt-1 text-xs text-amber-100/70">This calls the backend demo reset and clears demo incident state/history. Use it only when you want to reset the demonstration.</p>
+          <h2 className="text-sm font-semibold text-[#B7791F]">Clear demo data</h2>
+          <p className="mt-1 text-xs text-[#805400]">This clears demo incident history. It does not change industrial controls.</p>
         </div>
-        <button onClick={onResetDemo} className="h-9 px-3 rounded-lg border border-amber-600/40 text-amber-200 hover:bg-amber-900/30 text-xs font-semibold flex items-center gap-2"><RotateCcw className="w-3.5 h-3.5" /> RESET DEMO DATA</button>
+        <button onClick={onResetDemo} className="h-9 px-3 rounded-lg border border-[#B7791F]/40 bg-white hover:bg-[#FEF0C7] text-[#B7791F] text-xs font-semibold flex items-center gap-2 cursor-pointer transition-colors"><RotateCcw className="w-3.5 h-3.5" /> RESET DEMO DATA</button>
       </section>
     </main>
   );

@@ -10,7 +10,8 @@ from collections import deque
 from models import TagRegistryEntry
 
 # -----------------------------------------------------------------------------
-# Master Tag Registry Definitions (11 tags across 3 units)
+# Master Tag Registry Definitions. Wastewater values below are synthetic
+# reference ranges for demonstrations, not approved plant operating limits.
 # -----------------------------------------------------------------------------
 
 TAG_REGISTRY: Dict[str, TagRegistryEntry] = {
@@ -156,6 +157,175 @@ TAG_REGISTRY: Dict[str, TagRegistryEntry] = {
         severity_weight=0.50,
         topology_upstream=[],
         short_label="Tank level change",
+    ),
+
+    # -------------------------------------------------------------------------
+    # Wastewater reference plant (illustrative 50 MLD conventional process)
+    # Flow rates are expressed in m³/h (50 MLD averages about 2,083 m³/h).
+    # All ranges and trips are demo configuration and must be replaced with
+    # site design, permits, and approved alarm rationalization before use.
+    # -------------------------------------------------------------------------
+    "LIT-101-WWL": TagRegistryEntry(
+        tag="LIT-101-WWL", equipment_id="LiftStation-01", unit="%",
+        data_type="float", baseline_min=35.0, baseline_max=60.0,
+        trip_threshold=85.0, severity_weight=0.88,
+        topology_upstream=["FIT-101-DIS"], short_label="Wet-well level rise",
+    ),
+    "FIT-101-DIS": TagRegistryEntry(
+        tag="FIT-101-DIS", equipment_id="LiftStation-01", unit="m³/h",
+        data_type="float", baseline_min=1700.0, baseline_max=2350.0,
+        trip_threshold=1200.0, severity_weight=0.64,
+        topology_upstream=["PIT-101-DIS", "MOT-101-CUR"],
+        short_label="Lift discharge flow reduction",
+    ),
+    "PIT-101-DIS": TagRegistryEntry(
+        tag="PIT-101-DIS", equipment_id="LiftStation-01", unit="bar",
+        data_type="float", baseline_min=1.8, baseline_max=3.0,
+        trip_threshold=4.2, severity_weight=0.40,
+        topology_upstream=[], short_label="Lift discharge pressure",
+    ),
+    "MOT-101-CUR": TagRegistryEntry(
+        tag="MOT-101-CUR", equipment_id="LiftStation-01", unit="A",
+        data_type="float", baseline_min=75.0, baseline_max=110.0,
+        trip_threshold=145.0, severity_weight=0.38,
+        topology_upstream=[], short_label="Lift pump motor current",
+    ),
+    "ALM-WW-101-HH": TagRegistryEntry(
+        tag="ALM-WW-101-HH", equipment_id="LiftStation-01", unit="status",
+        data_type="bool", baseline_min=0.0, baseline_max=0.0,
+        trip_threshold=1.0, severity_weight=1.0,
+        topology_upstream=["LIT-101-WWL"], short_label="Wet-well high-high level",
+    ),
+    "FIT-110-IN": TagRegistryEntry(
+        tag="FIT-110-IN", equipment_id="InletWorks-01", unit="m³/h",
+        data_type="float", baseline_min=1700.0, baseline_max=2350.0,
+        trip_threshold=3200.0, severity_weight=0.34,
+        topology_upstream=[], short_label="Influent flow",
+    ),
+    "DPT-110-SCR": TagRegistryEntry(
+        tag="DPT-110-SCR", equipment_id="InletWorks-01", unit="kPa",
+        data_type="float", baseline_min=0.5, baseline_max=1.5,
+        trip_threshold=4.0, severity_weight=0.70,
+        topology_upstream=["FIT-110-IN"], short_label="Screen differential pressure",
+    ),
+    "ALM-SCR-110-DP": TagRegistryEntry(
+        tag="ALM-SCR-110-DP", equipment_id="InletWorks-01", unit="status",
+        data_type="bool", baseline_min=0.0, baseline_max=0.0,
+        trip_threshold=1.0, severity_weight=0.88,
+        topology_upstream=["DPT-110-SCR"], short_label="Coarse screen differential pressure high",
+    ),
+    "AIT-201-DO": TagRegistryEntry(
+        tag="AIT-201-DO", equipment_id="AerationBasin-01", unit="mg/L",
+        data_type="float", baseline_min=1.5, baseline_max=2.5,
+        trip_threshold=1.0, severity_weight=0.82,
+        topology_upstream=[], short_label="Aeration dissolved oxygen low",
+    ),
+    "AIT-201-NH4": TagRegistryEntry(
+        tag="AIT-201-NH4", equipment_id="AerationBasin-01", unit="mg/L",
+        data_type="float", baseline_min=1.0, baseline_max=3.0,
+        trip_threshold=8.0, severity_weight=0.70,
+        topology_upstream=["AIT-201-DO"], short_label="Ammonia concentration rise",
+    ),
+    "ALM-AER-201-DO": TagRegistryEntry(
+        tag="ALM-AER-201-DO", equipment_id="AerationBasin-01", unit="status",
+        data_type="bool", baseline_min=0.0, baseline_max=0.0,
+        trip_threshold=1.0, severity_weight=0.88,
+        topology_upstream=["AIT-201-DO"], short_label="Aeration dissolved oxygen low alarm",
+    ),
+    "ALM-AER-201-NH4": TagRegistryEntry(
+        tag="ALM-AER-201-NH4", equipment_id="AerationBasin-01", unit="status",
+        data_type="bool", baseline_min=0.0, baseline_max=0.0,
+        trip_threshold=1.0, severity_weight=0.90,
+        topology_upstream=["AIT-201-NH4"], short_label="Ammonia high alarm",
+    ),
+
+    # Scenario 7 tertiary filtration / UV data. These are illustrative demo
+    # ranges, not configured site limits; all generator outputs are simulated.
+    "BWP-1-TRIP": TagRegistryEntry(
+        tag="BWP-1-TRIP", equipment_id="TertiaryTreatment-01", unit="status",
+        data_type="string", baseline_min=0.0, baseline_max=0.0, baseline_status="NORMAL",
+        trip_threshold=None, severity_weight=0.65,
+        topology_upstream=[], short_label="BWP-1 trip status",
+    ),
+    "BWP-2-SEL-OFF": TagRegistryEntry(
+        tag="BWP-2-SEL-OFF", equipment_id="TertiaryTreatment-01", unit="status",
+        data_type="string", baseline_min=0.0, baseline_max=0.0, baseline_status="NORMAL",
+        trip_threshold=None, severity_weight=0.55,
+        topology_upstream=[], short_label="BWP-2 selector OFF status",
+    ),
+    "FLT-401-BW-HOURS": TagRegistryEntry(
+        tag="FLT-401-BW-HOURS", equipment_id="TertiaryTreatment-01", unit="h",
+        data_type="float", baseline_min=0.0, baseline_max=24.0,
+        trip_threshold=None, severity_weight=0.70,
+        topology_upstream=["BWP-1-TRIP", "BWP-2-SEL-OFF"], short_label="Filter run time since backwash",
+    ),
+    "FLT-401-HL": TagRegistryEntry(
+        tag="FLT-401-HL", equipment_id="TertiaryTreatment-01", unit="m",
+        data_type="float", baseline_min=0.8, baseline_max=1.5,
+        trip_threshold=None, severity_weight=0.82,
+        topology_upstream=["FLT-401-BW-HOURS"], short_label="Filter head loss",
+    ),
+    "FLT-401-TURB": TagRegistryEntry(
+        tag="FLT-401-TURB", equipment_id="TertiaryTreatment-01", unit="NTU",
+        data_type="float", baseline_min=0.5, baseline_max=2.0,
+        trip_threshold=None, severity_weight=0.88,
+        topology_upstream=["FLT-401-HL"], short_label="Filter outlet turbidity",
+    ),
+    "UV-501-UVT": TagRegistryEntry(
+        tag="UV-501-UVT", equipment_id="TertiaryTreatment-01", unit="%",
+        data_type="float", baseline_min=65.0, baseline_max=75.0,
+        trip_threshold=None, severity_weight=0.90,
+        topology_upstream=["FLT-401-TURB"], short_label="UV transmittance",
+    ),
+    "UV-501-LAMPS-ON": TagRegistryEntry(
+        tag="UV-501-LAMPS-ON", equipment_id="TertiaryTreatment-01", unit="lamps",
+        data_type="float", baseline_min=24.0, baseline_max=24.0,
+        trip_threshold=None, severity_weight=0.84,
+        topology_upstream=[], short_label="UV lamps in service",
+    ),
+    "UV-501-INTENSITY": TagRegistryEntry(
+        tag="UV-501-INTENSITY", equipment_id="TertiaryTreatment-01", unit="mW/cm²",
+        data_type="float", baseline_min=14.0, baseline_max=18.0,
+        trip_threshold=None, severity_weight=0.82,
+        topology_upstream=[], short_label="UV intensity",
+    ),
+    "UV-501-DOSE": TagRegistryEntry(
+        tag="UV-501-DOSE", equipment_id="TertiaryTreatment-01", unit="mJ/cm²",
+        data_type="float", baseline_min=30.0, baseline_max=40.0,
+        trip_threshold=None, severity_weight=0.98,
+        topology_upstream=["FLT-401-HL", "FLT-401-TURB", "UV-501-UVT", "UV-501-LAMPS-ON", "UV-501-INTENSITY"],
+        short_label="UV dose delivered",
+    ),
+    "ALM-UV-501-DOSE-LOW": TagRegistryEntry(
+        tag="ALM-UV-501-DOSE-LOW", equipment_id="TertiaryTreatment-01", unit="status",
+        data_type="bool", baseline_min=0.0, baseline_max=0.0,
+        trip_threshold=1.0, severity_weight=1.0,
+        topology_upstream=["UV-501-DOSE", "BWP-1-TRIP", "BWP-2-SEL-OFF", "FLT-401-BW-HOURS"],
+        short_label="UV dose low alarm",
+    ),
+    "RLV-501-CLOSED": TagRegistryEntry(
+        tag="RLV-501-CLOSED", equipment_id="TertiaryTreatment-01", unit="status",
+        data_type="string", baseline_min=0.0, baseline_max=0.0, baseline_status="NORMAL",
+        trip_threshold=None, severity_weight=0.5,
+        topology_upstream=["ALM-UV-501-DOSE-LOW"], short_label="Reuse-line closed status",
+    ),
+    "CHL-501-BACKUP-STATUS": TagRegistryEntry(
+        tag="CHL-501-BACKUP-STATUS", equipment_id="TertiaryTreatment-01", unit="status",
+        data_type="string", baseline_min=0.0, baseline_max=0.0, baseline_status="NORMAL",
+        trip_threshold=None, severity_weight=0.45,
+        topology_upstream=["ALM-UV-501-DOSE-LOW"], short_label="Backup-disinfection status",
+    ),
+    "CHL-501-RESIDUAL": TagRegistryEntry(
+        tag="CHL-501-RESIDUAL", equipment_id="TertiaryTreatment-01", unit="mg/L",
+        data_type="float", baseline_min=0.0, baseline_max=0.0,
+        trip_threshold=None, severity_weight=0.35,
+        topology_upstream=["CHL-501-BACKUP-STATUS"], short_label="Residual-disinfectant reading",
+    ),
+    "LAB-501-COLIFORM": TagRegistryEntry(
+        tag="LAB-501-COLIFORM", equipment_id="TertiaryTreatment-01", unit="MPN/100 mL",
+        data_type="float", baseline_min=0.0, baseline_max=10.0,
+        trip_threshold=None, severity_weight=0.55,
+        topology_upstream=["UV-501-DOSE"], short_label="Simulated lab coliform result",
     ),
 }
 

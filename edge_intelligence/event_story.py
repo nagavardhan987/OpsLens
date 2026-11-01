@@ -54,15 +54,37 @@ class EventStoryConstructor:
                 direction = "decreased"
             abs_delta = abs(dev.deviation_pct)
 
-            # Baseline midpoint as value_before, computed excursion as value_after
-            if entry.data_type == "bool":
+            # Prefer the observed onset reading. Legacy events with no stored
+            # sample retain their estimate but label it as baseline-derived.
+            if dev.value_after is not None:
+                val_before = dev.value_before
+                val_after = dev.value_after
+                if entry.data_type == "bool":
+                    desc = f"{tag_label} ({dev.tag}) annunciated" if val_after else f"{tag_label} ({dev.tag}) cleared"
+                elif entry.data_type == "string":
+                    desc = f"{tag_label} ({dev.tag}): {val_after}"
+                else:
+                    desc = f"{tag_label} ({dev.tag}) reading recorded"
+                unit = dev.unit or entry.unit
+                data_source = dev.data_source or "recorded"
+                data_quality = dev.data_quality or "UNKNOWN"
+                connection_status = dev.connection_status or "unknown"
+            elif entry.data_type == "bool":
                 val_before = 0.0
                 val_after = 1.0 if dev.deviation_pct > 0 else 0.0
                 desc = f"{tag_label} ({dev.tag}) annunciated"
+                unit = entry.unit
+                data_source = "calculated_from_configured_baseline"
+                data_quality = "UNKNOWN"
+                connection_status = "unknown"
             else:
                 val_before = round((entry.baseline_min + entry.baseline_max) / 2.0, 2)
                 val_after = round(val_before * (1.0 + dev.deviation_pct / 100.0), 2)
                 desc = f"{tag_label} ({dev.tag}) {direction} by {abs_delta:.1f}%"
+                unit = entry.unit
+                data_source = "calculated_from_configured_baseline"
+                data_quality = "UNKNOWN"
+                connection_status = "unknown"
 
             steps.append(
                 EventStoryStep(
@@ -71,7 +93,11 @@ class EventStoryConstructor:
                     timestamp=dev.timestamp,
                     description=desc,
                     value_before=val_before,
-                    value_after=val_after
+                    value_after=val_after,
+                    unit=unit,
+                    data_source=data_source,
+                    data_quality=data_quality,
+                    connection_status=connection_status,
                 )
             )
             step_number += 1
@@ -80,36 +106,52 @@ class EventStoryConstructor:
         primary_entry = get_tag_entry(correlated_event.primary_tag)
         primary_label = primary_entry.short_label if primary_entry.short_label else correlated_event.primary_tag
 
+        telemetry_rows = (correlated_event.temporal_context or {}).get("telemetry") or []
+        primary_reading = next((item for item in telemetry_rows if item.get("tag") == correlated_event.primary_tag), {})
+        primary_val_before = None
+        primary_val_after = primary_reading.get("value")
+        primary_unit = primary_reading.get("unit") or primary_entry.unit
+        primary_source = primary_reading.get("data_source") or primary_reading.get("source") or "recorded"
+        primary_quality = primary_reading.get("data_quality") or primary_reading.get("quality") or "UNKNOWN"
+        primary_connection = primary_reading.get("connection_status") or "unknown"
+
         if primary_entry.data_type == "bool" or correlated_event.primary_alarm:
-            primary_val_before = 0.0
-            primary_val_after = 1.0
+            if primary_val_after is None:
+                primary_val_after = True
+                primary_source = "alarm_record"
             primary_desc = f"{primary_label} ({correlated_event.primary_tag}) annunciated (Trip Alarm Active)"
-        else:
+        elif primary_val_after is None:
             primary_val_before = round((primary_entry.baseline_min + primary_entry.baseline_max) / 2.0, 2)
             primary_val_after = round(primary_val_before * (1.0 + correlated_event.raw_deviation_pct / 100.0), 2)
             direction = "increased" if correlated_event.raw_deviation_pct >= 0 else "decreased"
             abs_delta = abs(correlated_event.raw_deviation_pct)
             primary_desc = f"{primary_label} ({correlated_event.primary_tag}) {direction} by {abs_delta:.1f}%"
+            primary_source = "calculated_from_configured_baseline"
+            primary_quality = "UNKNOWN"
 
         steps.append(
             EventStoryStep(
                 step_number=step_number,
                 tag=correlated_event.primary_tag,
-                timestamp=correlated_event.trigger_timestamp,
+                timestamp=primary_reading.get("timestamp") or correlated_event.trigger_timestamp,
                 description=primary_desc,
                 value_before=primary_val_before,
-                value_after=primary_val_after
+                value_after=primary_val_after,
+                unit=primary_unit,
+                data_source=primary_source,
+                data_quality=primary_quality,
+                connection_status=primary_connection,
             )
         )
 
-        # Build causal_label arrow chain from short_labels in step order
+        # This legacy field now records chronology, not physical causation.
         chain_labels: List[str] = []
         for step in steps:
             step_entry = get_tag_entry(step.tag)
             label = step_entry.short_label if step_entry.short_label else step.tag
             chain_labels.append(label)
 
-        causal_label = " -> ".join(chain_labels)
+        causal_label = "Recorded chronological sequence (not causal proof): " + " -> ".join(chain_labels)
 
         story = EventStory(
             event_id=correlated_event.event_id,

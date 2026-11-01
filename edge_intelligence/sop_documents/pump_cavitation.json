@@ -1,9 +1,15 @@
 {
   "sop_id": "SOP-P02-CAV-01",
-  "document_status": "APPROVED PROCEDURE — EcoStruxure Asset Advisor Verified",
+  "approved": false,
+  "document_status": "Locally authored demonstration procedure; operational approval status not verified.",
   "title": "Pump-02 Low Flow Cavitation & Suction Recovery Procedure",
   "equipment_id": "Pump-02",
-  "tags": ["FIT-02-FLW", "PIT-02-PRS", "MOT-02-CUR", "VLV-04-POS"],
+  "tags": [
+    "FIT-02-FLW",
+    "PIT-02-PRS",
+    "MOT-02-CUR",
+    "VLV-04-POS"
+  ],
   "keywords": [
     "cavitation",
     "low flow",
@@ -26,5 +32,7 @@
     "Check upstream buffer tank TNK-01-LVL to verify adequate suction head (NPSHa > NPSHr).",
     "Reduce pump speed by 15% or throttle suction booster valve to collapse vapor cavitation pockets.",
     "Inspect pump volute and impeller for cavitation pitting noise; restore normal flow above 75 L/min."
-  ]
+  ],
+  "approval_status": "unverified",
+  "approval_reference": null
 }

@@ -23,6 +23,16 @@ class TestLlmGroundingAndFallback(unittest.TestCase):
         assistant._llm_complete_override = None
         clear()
 
+    def test_provider_timeout_has_fast_configurable_default(self):
+        from unittest.mock import patch
+        from llm_provider import llm_timeout
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(llm_timeout(), 4.0)
+        with patch.dict(os.environ, {"OPSLENS_LLM_TIMEOUT": "2.5", "EDGE_LLM_TIMEOUT": "7"}, clear=True):
+            self.assertEqual(llm_timeout(), 2.5)
+        with patch.dict(os.environ, {"EDGE_LLM_TIMEOUT": "6"}, clear=True):
+            self.assertEqual(llm_timeout(), 6.0)
+
     def test_llm_success_preserves_frontend_fields_and_uses_recorded_values(self):
         def fake_llm(_prompt):
             return json.dumps({
@@ -35,6 +45,7 @@ class TestLlmGroundingAndFallback(unittest.TestCase):
         self.assertTrue(result["llm_used"])
         self.assertFalse(result["fallback_used"])
         self.assertIn("from 82 to 56", result["answer"])
+        self.assertIn("from 82 to 56", result["question_answer"])
         self.assertEqual(result["supporting_readings"][0]["value"], 56)
         self.assertIn("answer", result)
         self.assertIn("uncertainty_status", result)
@@ -46,6 +57,9 @@ class TestLlmGroundingAndFallback(unittest.TestCase):
         self.assertFalse(result["fallback_used"])
         self.assertEqual(result["selected_provider"], "none")
         self.assertEqual(result["used_provider"], "configured_test_override")
+        self.assertIn("initial_llm_inference", result["timings_ms"])
+        self.assertIn("grounding_validation", result["timings_ms"])
+        self.assertGreaterEqual(result["timings_ms"]["total_analysis"], 0)
 
     def test_malformed_and_hallucinated_numbers_fall_back(self):
         malformed = answer_incident_question(example_event(), "Why did this alarm trigger?", llm_complete=lambda _: "not json")
@@ -63,6 +77,48 @@ class TestLlmGroundingAndFallback(unittest.TestCase):
         invented = answer_incident_question(example_event(), "Why did this alarm trigger?", llm_complete=invent)
         self.assertTrue(invented["fallback_used"])
         self.assertNotIn("999.1", invented["answer"])
+
+    def test_numeric_identifier_segments_are_not_measurement_claims(self):
+        identifiers = "ALM-C01-VB, CMP-01-SPD, PIT-02-PRS, and SOP-P02-VLV-01"
+        result = answer_incident_question(
+            example_event(), "Which recorded identifiers are relevant?",
+            llm_complete=lambda _prompt: json.dumps({
+                "answer": f"Recorded identifiers include {identifiers}."
+            }),
+        )
+        self.assertTrue(result["llm_used"])
+        self.assertIn("ALM-C01-VB", result["answer"])
+        self.assertIn("SOP-P02-VLV-01", result["answer"])
+
+    def test_unsupported_measurement_still_fails_numeric_grounding(self):
+        result = answer_incident_question(
+            example_event(), "What was the recorded pressure?",
+            llm_complete=lambda _prompt: json.dumps({
+                "answer": "The recorded pressure was 888.6 kPa."
+            }),
+        )
+        self.assertFalse(result["llm_used"])
+        self.assertEqual(result["fallback_reason"], "ungrounded_numeric_value")
+
+    def test_correction_rate_limit_returns_deterministic_fallback(self):
+        from llm_provider import ProviderError
+
+        calls = 0
+
+        def provider(_prompt):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return json.dumps({"answer": "The recorded pressure was 888.6 kPa."})
+            raise ProviderError("rate_limit", "provider rate limit")
+
+        result = answer_incident_question(
+            example_event(), "What was the recorded pressure?", llm_complete=provider,
+        )
+        self.assertEqual(calls, 2)
+        self.assertTrue(result["fallback_used"])
+        self.assertEqual(result["fallback_reason"], "ungrounded_numeric_value")
+        self.assertEqual(result["correction_failure_reason"], "rate_limit")
 
     def test_timeout_auth_and_empty_use_deterministic_fallback(self):
         from llm_provider import ProviderError
@@ -245,6 +301,34 @@ class TestLlmGroundingAndFallback(unittest.TestCase):
                 self.assertEqual(invalid.exception.kind, "invalid_request")
                 self.assertEqual(invalid.exception.status_code, 400)
 
+    def test_groq_429_retries_once_within_budget_and_skips_exhausted_quota(self):
+        from unittest.mock import MagicMock, patch
+        from llm_provider import ProviderError, complete_chat
+
+        rate_limited = MagicMock(status_code=429, headers={"retry-after": "0.1"})
+        rate_limited.json.return_value = {"error": {"message": "rate limit"}}
+        recovered = MagicMock(status_code=200)
+        recovered.json.return_value = {"choices": [{"message": {"content": '{"answer":"ok"}'}}]}
+        with patch.dict(os.environ, {
+            "OPSLENS_LLM_PROVIDER": "groq", "GROQ_API_KEY": "fake",
+            "OPSLENS_GROQ_MAX_RETRY_WAIT": "0.5",
+        }), patch("llm_provider.requests.post", side_effect=[rate_limited, recovered]) as post, \
+             patch("llm_provider.time.sleep") as sleep:
+            self.assertEqual(complete_chat("prompt"), '{"answer":"ok"}')
+            self.assertEqual(post.call_count, 2)
+            sleep.assert_called_once_with(0.1)
+
+        exhausted = MagicMock(status_code=429, headers={})
+        exhausted.json.return_value = {"error": {"code": "insufficient_quota"}}
+        with patch.dict(os.environ, {"OPSLENS_LLM_PROVIDER": "groq", "GROQ_API_KEY": "fake"}), \
+             patch("llm_provider.requests.post", return_value=exhausted) as post, \
+             patch("llm_provider.time.sleep") as sleep:
+            with self.assertRaises(ProviderError) as raised:
+                complete_chat("prompt")
+            self.assertEqual(raised.exception.kind, "rate_limit")
+            post.assert_called_once()
+            sleep.assert_not_called()
+
     def test_transport_errors_are_classified_without_logging_secrets(self):
         import requests
         from llm_provider import _request_failure_kind
@@ -267,14 +351,14 @@ class TestLlmGroundingAndFallback(unittest.TestCase):
                 "document_name": "Pump procedure reference",
                 "section": "3.2",
                 "document_status": "Approval status not verified",
-                "text": "Isolate the pump before inspection.",
+                "text": "Inspect the recorded pump condition before taking further action.",
             }}],
         }
         called = []
         safe_answer = (
-            "Recorded readings show flow fell from 82 to 56 L/min before the alarm. The time window has a recorded-data "
-            "gap; this is a temporal association, not proof of physical cause. The retrieved "
-            "procedure is an unverified reference; sufficient approved guidance was not retrieved."
+            "The recorded event story shows a flow reduction before the high-pressure alarm. The time window has a "
+            "recorded-data gap; this is a temporal association, not proof of physical cause. The retrieved procedure "
+            "is an unverified reference; sufficient approved guidance was not retrieved."
         )
         context = {"missing_data": ["No numeric readings were recorded during the first 25 minutes."],
                    "trend_summaries": [{"tag": "FIT-02-FLW", "unit": "L/min", "first_observed": {"value": 82}, "last_observed": {"value": 56}}]}
@@ -282,18 +366,58 @@ class TestLlmGroundingAndFallback(unittest.TestCase):
             event, "What changed in the readings and what SOP applies?",
             llm_complete=lambda prompt: called.append(prompt) or json.dumps({"answer": safe_answer}),
             context=context,
+            sop_document_loader=lambda _sop_id: {
+                "sop_id": "SOP-TEST-UNVERIFIED", "title": "Pump procedure reference",
+                "equipment_id": "Pump-02", "steps": ["Inspect the recorded pump condition before taking further action."],
+            },
         )
         self.assertEqual(len(called), 1)
         self.assertIn("Approval status not verified", called[0])
-        self.assertNotIn("Isolate the pump before inspection", called[0])
+        self.assertIn("Inspect the recorded pump condition", called[0])
+        self.assertIn("reference_only_not_approved", called[0])
         self.assertTrue(result["llm_used"])
         self.assertFalse(result["fallback_used"])
         self.assertIsNone(result["fallback_reason"])
         self.assertEqual(result["uncertainty_status"], "insufficient_approved_procedure")
-        self.assertIn("unverified reference", result["answer"].lower())
-        self.assertIn("82 to 56", result["answer"])
-        self.assertIn("recorded-data gap", result["answer"])
+        self.assertIn("approval status is not verified", result["answer"].lower())
+        self.assertIn("flow reduction", result["answer"].lower())
+        self.assertIn("no numeric readings were recorded", result["answer"].lower())
         self.assertEqual(result["sources"][0]["document_status"], "Approval status not verified")
+
+    def test_unverified_reference_is_descriptively_summarized_and_never_used_as_action(self):
+        event = example_event()
+        event["sop_match"] = {
+            "sop_id": "SOP-TEST-UNVERIFIED",
+            "retrieved_chunks": [{"payload": {
+                "sop_id": "SOP-TEST-UNVERIFIED", "section": "3.2",
+                "text": "Inspect the recorded pump condition before taking further action.",
+            }}],
+        }
+        answer_text = (
+            "The reference-only passage in SOP-TEST-UNVERIFIED, Section 3.2, describes reviewing "
+            "the recorded pump condition; its approval is not verified, so approved guidance was not retrieved."
+        )
+        result = answer_incident_question(
+            event, "What does the retrieved procedure cover?",
+            llm_complete=lambda _prompt: json.dumps({
+                "answer": answer_text,
+                "immediate_checks": ["Isolate the pump immediately."],
+            }),
+            sop_document_loader=lambda _sop_id: {
+                "sop_id": "SOP-TEST-UNVERIFIED", "title": "Pump procedure reference",
+                "equipment_id": "Pump-02",
+                "steps": ["Inspect the recorded pump condition before taking further action."],
+            },
+        )
+        self.assertTrue(result["llm_used"])
+        self.assertIn("reference-only passage", result["answer"].lower())
+        self.assertIn("REFERENCE ONLY — NOT APPROVED", result["answer"])
+        self.assertNotIn("Isolate the pump", result["answer"])
+        self.assertNotIn("Isolate the pump", result["operator_response"]["recommended_checks"])
+        self.assertEqual(result["operator_response"]["relevant_sop"]["passages"][0]["text"],
+                         "Inspect the recorded pump condition before taking further action.")
+        self.assertEqual(result["operator_response"]["resolution_criteria"],
+                         "Not established by retrieved approved guidance.")
 
     def test_unverified_sop_instructions_from_llm_are_rejected(self):
         event = example_event()
@@ -305,17 +429,45 @@ class TestLlmGroundingAndFallback(unittest.TestCase):
                 "document_name": "Pump procedure reference",
                 "section": "3.2",
                 "document_status": "Approval status not verified",
-                "text": "Isolate the pump before inspection.",
+                "text": "Inspect the recorded pump condition before taking further action.",
             }}],
         }
         result = answer_incident_question(
             event, "What SOP applies to this incident?",
             llm_complete=lambda _prompt: '{"answer":"First, isolate the pump before inspection."}',
+            sop_document_loader=lambda _sop_id: {
+                "sop_id": "SOP-TEST-UNVERIFIED", "title": "Pump procedure reference",
+                "equipment_id": "Pump-02", "steps": ["Inspect the recorded pump condition before taking further action."],
+            },
         )
         self.assertFalse(result["llm_used"])
         self.assertTrue(result["fallback_used"])
         self.assertEqual(result["fallback_reason"], "unverified_sop_actionable_language")
         self.assertIn("approval status is not verified", result["answer"].lower())
+
+    def test_unapproved_sop_threshold_cannot_ground_model_numeric_claim(self):
+        event = example_event()
+        event["sop_match"] = {
+            "sop_id": "SOP-TEST-UNVERIFIED",
+            "retrieved_chunks": [{"payload": {
+                "sop_id": "SOP-TEST-UNVERIFIED", "section": "3.2",
+                "text": "Keep the valve below 70% during this procedure.",
+            }}],
+        }
+        result = answer_incident_question(
+            event, "What does the reference say?",
+            llm_complete=lambda _prompt: json.dumps({
+                "answer": "The reference says the valve should remain below 70%."
+            }),
+            sop_document_loader=lambda _sop_id: {
+                "sop_id": "SOP-TEST-UNVERIFIED", "title": "Unapproved reference",
+                "equipment_id": "Pump-02", "steps": ["Keep the valve below 70% during this procedure."],
+            },
+        )
+        self.assertFalse(result["llm_used"])
+        self.assertTrue(result["fallback_used"])
+        self.assertEqual(result["fallback_reason"], "ungrounded_numeric_value")
+        self.assertIn("REFERENCE ONLY — NOT APPROVED", result["answer"])
 
     def test_ungrounded_numeric_draft_gets_one_correction_attempt(self):
         drafts = iter([
@@ -904,7 +1056,7 @@ class TestLlmGroundingAndFallback(unittest.TestCase):
         self.assertIn("82 L/min", result["answer"])
         self.assertIn("56 L/min", result["answer"])
         self.assertIn("first 25 minutes", result["answer"])
-        self.assertIn("approval status is not verified", result["answer"].lower())
+        self.assertIn("could not be resolved", result["answer"].lower())
 
     def test_llm_cannot_change_uncertainty_or_operator_checks(self):
         def fake_llm(_prompt):
@@ -1010,7 +1162,56 @@ class TestLlmGroundingAndFallback(unittest.TestCase):
             })
         result = answer_incident_question(event, "What procedure should I follow?", llm_complete=invent_sop)
         self.assertTrue(result["fallback_used"])
-        self.assertIn("Sufficient approved procedure guidance was not retrieved", result["answer"])
+        self.assertIn("No applicable approved SOP passage was retrieved", result["answer"])
+
+    def test_missing_sop_does_not_block_llm_evidence_explanation_or_allow_invented_readings(self):
+        event = example_event()
+        event["sop_match"] = {
+            "sop_id": "SOP-NONE", "retrieved_chunks": [], "retrieval_status": "no_match"
+        }
+        context = {
+            "window": {"start": "2026-10-16T09:30:00Z", "end": "2026-10-16T10:00:00Z"},
+            "readings": [
+                {"tag": "FIT-02-FLW", "value": 82, "unit": "L/min", "timestamp": "2026-10-16T09:58:00Z"},
+                {"tag": "FIT-02-FLW", "value": 56, "unit": "L/min", "timestamp": "2026-10-16T09:59:00Z"},
+            ],
+            "trend_summaries": [{
+                "tag": "FIT-02-FLW", "unit": "L/min", "reading_count": 2,
+                "first_observed": {"value": 82, "timestamp": "2026-10-16T09:58:00Z"},
+                "last_observed": {"value": 56, "timestamp": "2026-10-16T09:59:00Z"},
+                "minimum": {"value": 56}, "maximum": {"value": 82},
+                "absolute_change": -26, "percentage_change": -31.7,
+                "coverage_note": "Partial recorded history.", "gap_count": 0,
+            }],
+            "related_events": [], "operator_actions": [], "missing_data": [],
+        }
+        result = answer_incident_question(
+            event,
+            "What changed in the historical flow readings?",
+            context=context,
+            llm_complete=lambda _prompt: json.dumps({
+                "answer": "FIT-02-FLW fell from 82 to 56 L/min in the recorded readings; this supports an association, not a confirmed cause."
+            }),
+        )
+        self.assertTrue(result["llm_used"])
+        self.assertFalse(result["fallback_used"])
+        self.assertEqual(result["sources"], [])
+        self.assertEqual(result["sop_resolution"]["status"], "not_retrieved")
+        self.assertIn("FIT-02-FLW", result["operator_response"]["bottom_line"])
+        self.assertTrue(any("No applicable approved SOP passage" in item
+                            for item in result["operator_response"]["data_limitations"]))
+
+        invented = answer_incident_question(
+            event,
+            "What changed in the historical flow readings?",
+            context=context,
+            llm_complete=lambda _prompt: json.dumps({
+                "answer": "FIT-02-FLW reached 999 L/min before the alarm."
+            }),
+        )
+        self.assertFalse(invented["llm_used"])
+        self.assertTrue(invented["fallback_used"])
+        self.assertNotIn("999 L/min", invented["answer"])
 
     def test_recurrence_uses_supplied_records_only(self):
         empty = build_assistant_response(example_event(), "Has this happened on this valve today?", similar_incidents=[])

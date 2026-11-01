@@ -73,3 +73,6 @@ sentence-transformers/
 
 # Local embedded Qdrant runtime data (created on this edge PC)
 edge_intelligence/qdrant_data/
+edge_intelligence/plc_tag_mapping.json
+edge_intelligence/plc_tag_mapping.local.json
+edge_intelligence/plc_certs/

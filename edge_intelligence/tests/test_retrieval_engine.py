@@ -132,6 +132,18 @@ class TestRetrievalEngineUnit(unittest.TestCase):
         self.assertEqual(match.sop_id, "SOP-P02-SEAL-01")
         self.assertEqual(match.why_retrieved["equipment"], "Pump-02")
 
+    def test_inletworks_screen_alarm_has_no_bundled_applicable_sop_match(self):
+        retriever = SopRetriever(db=self.db, force_source="bm25")
+        match = retriever.retrieve(
+            primary_tag="ALM-SCR-110-DP",
+            telemetry_snapshot={"equipment": "InletWorks-01"},
+            custom_query="InletWorks-01 ALM-SCR-110-DP DPT-110-SCR high screen differential pressure",
+            persist=False,
+        )
+        self.assertEqual(match.sop_id, "SOP-NONE")
+        self.assertEqual(match.retrieval_status, "no_match")
+        self.assertEqual(match.retrieved_chunks, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,5 @@
-import React from 'react';
-import { Activity, ArrowDownRight, ArrowUpRight, Gauge, Minus, SlidersHorizontal, Zap } from 'lucide-react';
+import React, { useRef } from 'react';
+import { Activity, ArrowDownRight, ArrowLeft, ArrowRight, ArrowUpRight, Gauge, Minus, SlidersHorizontal, Zap } from 'lucide-react';
 import { getEquipmentProcessTags } from '../lib/equipmentPresentation';
 
 const TAG_ICONS = {
@@ -12,6 +12,14 @@ const TAG_ICONS = {
   'CMP-01-CUR': Zap,
   'CMP-01-TMP': Gauge,
   'TNK-01-LVL': Activity,
+  'DPT-110-SCR': Gauge,
+  'FIT-110-IN': Activity,
+  'FIT-101-DIS': Activity,
+  'PIT-101-DIS': Gauge,
+  'MOT-101-CUR': Zap,
+  'LIT-101-WWL': Activity,
+  'AIT-201-DO': Activity,
+  'AIT-201-NH4': Activity,
 };
 
 function formatTimestamp(value) {
@@ -27,15 +35,24 @@ function formatValue(value) {
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 }
 
-function getObserved(event, tag, unit = '') {
+function sourceLabel(source) {
+  if (/synthetic|simulat/i.test(String(source || ''))) return 'SIMULATED';
+  if (/opc.?ua|plc/i.test(String(source || ''))) return 'LIVE PLC';
+  return 'RECORDED';
+}
+
+function getObserved(event, tag, unit = '', supportingReadings = []) {
   const scored = event?.evidence_audit?.scoring_breakdown?.tag_scores?.[tag]?.observed_reading;
   const step = [...(event?.story?.steps || [])].reverse().find((item) => item.tag === tag && typeof item.value_after === 'number');
-  if (scored && typeof scored.value === 'number') return { ...scored, unit: scored.unit || unit, value_before: step?.value_before, source: 'Evidence Engine record' };
-  if (step) return { value: step.value_after, unit: unit || step.unit || '', timestamp: step.timestamp, source: 'Event story record', value_before: step.value_before };
+  const recorded = supportingReadings.filter((item) => item.tag === tag && typeof item.value === 'number')
+    .sort((a, b) => Date.parse(b.timestamp || b.timestamp_utc || '') - Date.parse(a.timestamp || a.timestamp_utc || ''))[0];
+  if (recorded) return { ...recorded, timestamp: recorded.timestamp || recorded.timestamp_utc, unit: recorded.unit || unit, value_before: step?.value_before, source: recorded.data_source || recorded.source || 'Source not recorded' };
+  if (scored && typeof scored.value === 'number') return { ...scored, unit: scored.unit || unit, value_before: step?.value_before, source: scored.data_source || scored.source || 'Source not recorded' };
+  if (step) return { value: step.value_after, unit: unit || step.unit || '', timestamp: step.timestamp, source: step.data_source || step.source || 'Source not recorded', value_before: step.value_before };
   return null;
 }
 
-function MetricCard({ item, reading, event, equipmentId, isEquipmentStatus = false }) {
+function MetricCard({ item, reading, event, equipmentId, isEquipmentStatus = false, compact = false }) {
   const Icon = TAG_ICONS[item.tag] || item.icon || Activity;
   const value = isEquipmentStatus ? null : reading?.value;
   const delta = reading && typeof reading.value_before === 'number' ? reading.value - reading.value_before : null;
@@ -83,7 +100,7 @@ function MetricCard({ item, reading, event, equipmentId, isEquipmentStatus = fal
               {delta > 0 ? '+' : ''}{formatValue(delta)}&thinsp;{deltaUnit}
               {item.unit === '%' && <span className="ml-1 opacity-60 text-[9px]">pp</span>}
             </span>
-          ) : <span className="text-slate-600">Change unavailable</span>}
+          ) : <span className="text-slate-500" title="Change unavailable">—</span>}
           {isStale && <span className="freshness stale" title="Last reading more than 5 minutes ago">Stale</span>}
         </div>
       )}
@@ -92,15 +109,12 @@ function MetricCard({ item, reading, event, equipmentId, isEquipmentStatus = fal
       {!isEquipmentStatus && reading && (
         <details className="mt-1 group">
           <summary className="cursor-pointer text-[9px] text-slate-600 hover:text-slate-400 select-none list-none">
-            <span className="group-open:hidden">Show reading time ▸</span>
+            <span className="group-open:hidden">Reading details ▸</span>
             <span className="hidden group-open:inline">Hide ▴</span>
           </summary>
           <div className="mt-1 text-[9px] text-slate-500 leading-relaxed">
             <div>{formatTimestamp(reading.timestamp)}</div>
-            <div className="text-slate-600">{reading.source || 'Recorded value'}</div>
-            <div className="mt-0.5 text-slate-600 italic">
-              Recorded reading · not guaranteed live telemetry
-            </div>
+            <div className="text-slate-600">{sourceLabel(reading.source)}</div>
           </div>
         </details>
       )}
@@ -108,20 +122,23 @@ function MetricCard({ item, reading, event, equipmentId, isEquipmentStatus = fal
   );
 }
 
-export default function ProcessValues({ event, equipmentId }) {
-  const configuredTags = getEquipmentProcessTags(event, equipmentId);
+export default function ProcessValues({ event, equipmentId, compact = false, onOpenDetails, supportingReadings = [] }) {
+  const trackRef = useRef(null);
+  const configuredTags = event ? getEquipmentProcessTags(event, equipmentId) : [];
   return (
-    <section id="trends" className="space-y-3" aria-label="Equipment and sensor readings">
+    <section id="trends" className={`process-values-section${compact ? ' process-values-compact' : ''}`} aria-label="Equipment and sensor readings">
       <div className="section-heading-row">
         <div>
-          <p className="section-kicker">Equipment overview</p>
-          <h2 className="section-title">{equipmentId || 'Equipment'} process values</h2>
+          <p className="section-kicker">{event ? 'Equipment overview' : 'Sensor trends'}</p>
+          <h2 className="section-title">{event ? `${equipmentId || 'Equipment'} process values` : 'Recorded process values'}</h2>
         </div>
-        <span className="text-[10px] text-slate-500">
-          Recorded readings · not live telemetry
-        </span>
+        <div className="process-values-tools">
+          {compact && <><button type="button" aria-label="Previous equipment readings" onClick={() => trackRef.current?.scrollBy({ left: -300, behavior: 'smooth' })}><ArrowLeft size={14} /></button><button type="button" aria-label="Next equipment readings" onClick={() => trackRef.current?.scrollBy({ left: 300, behavior: 'smooth' })}><ArrowRight size={14} /></button><button type="button" onClick={onOpenDetails}>View details</button></>}
+        </div>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      {!event ? <div className="dashboard-panel text-sm leading-6 text-slate-400" role="status">
+        No incident is selected, so there are no recorded sensor trends to show. Select an incident from Alarm Queue or Alarm History to view its stored readings here.
+      </div> : <div ref={trackRef} className={compact ? 'process-values-track' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-5'}>
         <MetricCard
           item={{ tag: 'equipment-status', label: 'Equipment status', icon: Activity }}
           event={event}
@@ -132,12 +149,13 @@ export default function ProcessValues({ event, equipmentId }) {
           <MetricCard
             key={item.tag}
             item={{ ...item, icon: TAG_ICONS[item.tag] || Activity }}
-            reading={getObserved(event, item.tag, item.unit)}
+            reading={getObserved(event, item.tag, item.unit, supportingReadings)}
             event={event}
             equipmentId={equipmentId}
+          compact={compact}
           />
         ))}
-      </div>
+      </div>}
     </section>
   );
 }

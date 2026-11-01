@@ -159,7 +159,10 @@ class SyntheticDataGenerator:
                 value=val,
                 timestamp=ts_str,
                 unit=entry.unit,
-                equipment_id=entry.equipment_id
+                equipment_id=entry.equipment_id,
+                data_quality="VALID",
+                data_source="simulated",
+                connection_status="simulation",
             )
             readings.append(reading)
 
@@ -268,7 +271,9 @@ class SyntheticDataGenerator:
                     value = entry.baseline_min if entry.data_type == "bool" else (
                         (entry.baseline_min + entry.baseline_max) / 2.0 if entry.data_type == "float" else "NORMAL"
                     )
-                reading = TagReading(tag=tag, value=value, timestamp=ts, unit=entry.unit, equipment_id=entry.equipment_id)
+                reading = TagReading(tag=tag, value=value, timestamp=ts, unit=entry.unit,
+                                     equipment_id=entry.equipment_id, data_quality="VALID",
+                                     data_source="simulated", connection_status="simulation")
                 self.db.insert_reading(reading)
                 readings.append(reading)
             self.sim_clock += timedelta(seconds=self.sample_interval)

@@ -67,15 +67,14 @@ class FakeOrchestrator:
 
 
 class TestIncidentAssistant(unittest.TestCase):
-    def test_context_and_source_attribution_are_backend_derived(self):
+    def test_unresolved_sop_id_does_not_create_a_source_reference(self):
         result = build_assistant_response(example_event(), "Show the relevant SOP section")
         self.assertEqual(result["incident_context"]["alarm_id"], "ALM-P02-HP")
         self.assertEqual(result["incident_context"]["equipment"], "Pump-02")
         self.assertEqual(result["incident_context"]["timestamp"], "2026-10-16T10:00:00Z")
         self.assertEqual(result["supporting_readings"][0]["value"], 56)
-        self.assertEqual(result["sources"][0]["document_name"], "pump_manual.pdf")
-        self.assertEqual(result["sources"][0]["section"], "Flow checks")
-        self.assertEqual(result["sources"][0]["text"], "Check the documented flow trend.")
+        self.assertEqual(result["sources"], [])
+        self.assertEqual(result["sop_resolution"]["status"], "document_not_found")
         self.assertEqual(result["uncertainty_status"], "insufficient_approved_procedure")
         self.assertTrue(result["read_only"])
 
@@ -84,14 +83,68 @@ class TestIncidentAssistant(unittest.TestCase):
         event["sop_match"] = {"sop_id": "SOP-NONE", "retrieved_chunks": []}
         result = build_assistant_response(event, "What procedure should I follow?")
         self.assertEqual(result["uncertainty_status"], "insufficient_approved_procedure")
-        self.assertIn("Sufficient approved procedure guidance was not retrieved", result["answer"])
+        self.assertIn("No applicable approved SOP passage was retrieved", result["answer"])
         self.assertEqual(result["sources"], [])
+
+    def test_unverified_matching_sop_is_shown_as_reference_not_approved_guidance(self):
+        event = example_event()
+        event["sop_match"] = {
+            "sop_id": "SOP-DEMO-1",
+            "retrieved_chunks": [{
+                "text": "Check the documented flow trend before drawing an incident conclusion.",
+                "section": "Section 2.1",
+                "step_number": None,
+                "payload": {"sop_id": "SOP-DEMO-1", "section": "Section 2.1"},
+            }],
+        }
+        result = build_assistant_response(
+            event, "What does the retrieved procedure cover?",
+            sop_document_loader=lambda _sop_id: {
+                "sop_id": "SOP-DEMO-1", "title": "Demo procedure",
+                "equipment_id": "Pump-02", "approved": False,
+                "approval_status": "unverified",
+                "steps": ["Check the documented flow trend before drawing an incident conclusion."],
+            },
+        )
+        reference = result["operator_response"]["relevant_sop"]
+        self.assertEqual(reference["label"], "REFERENCE ONLY — NOT APPROVED")
+        self.assertFalse(reference["approved"])
+        self.assertEqual(reference["passages"][0]["text"],
+                         "Check the documented flow trend before drawing an incident conclusion.")
+        self.assertIn("REFERENCE ONLY — NOT APPROVED", result["answer"])
+        self.assertEqual(result["operator_response"]["resolution_criteria"],
+                         "Not established by retrieved approved guidance.")
 
     def test_why_answer_marks_cause_as_hypothesis_and_keeps_score_semantics(self):
         result = build_assistant_response(example_event(), "Why did this alarm trigger?")
         self.assertIn("not proof of causation", result["answer"])
         self.assertEqual(result["incident_context"]["evidence_score_type"], "normalized contributor ranking heuristic; not a probability")
         self.assertEqual(result["supporting_events"][0]["timestamp"], "2026-10-16T09:59:00Z")
+
+    def test_incident_analysis_remains_complete_when_no_sop_is_retrieved(self):
+        event = example_event()
+        event["sop_match"] = {
+            "sop_id": "SOP-NONE", "retrieved_chunks": [], "retrieval_status": "no_match"
+        }
+        result = build_assistant_response(event, "Why did this alarm trigger?")
+        self.assertEqual(result["uncertainty_status"], "hypothesis_requires_operator_verification")
+        self.assertIn("Flow reduction followed by pressure rise", result["operator_response"]["interpretation"][0])
+        self.assertEqual(result["supporting_readings"][0]["tag"], "FIT-02-FLW")
+        self.assertEqual(result["sources"], [])
+        self.assertTrue(any("No applicable approved SOP passage" in item
+                            for item in result["operator_response"]["data_limitations"]))
+
+    def test_unavailable_sop_retrieval_is_reported_without_replacing_incident_analysis(self):
+        event = example_event()
+        event["sop_match"] = {
+            "sop_id": "SOP-NONE", "retrieved_chunks": [], "retrieval_status": "unavailable"
+        }
+        result = build_assistant_response(event, "Why did this alarm trigger?")
+        self.assertIn("is recorded active on Pump-02", result["operator_response"]["bottom_line"])
+        self.assertEqual(result["sop_resolution"]["status"], "retrieval_unavailable")
+        self.assertEqual(result["sources"], [])
+        self.assertTrue(any("SOP retrieval was unavailable" in item
+                            for item in result["operator_response"]["data_limitations"]))
 
     def test_context_deviation_is_attached_only_to_the_observed_timestamp(self):
         context = {"window": {"start": "2026-10-16T09:30:00Z", "end": "2026-10-16T10:00:00Z"},
@@ -165,7 +218,7 @@ class TestIncidentAssistant(unittest.TestCase):
         event["sop_match"] = {"sop_id": "SOP-NONE", "retrieved_chunks": []}
         result = build_assistant_response(event, "What procedure should I follow?")
         self.assertTrue(result["operator_response"]["read_only"])
-        self.assertTrue(any("approval status is not verified" in item for item in result["operator_response"]["data_limitations"]))
+        self.assertTrue(any("No applicable approved SOP passage was retrieved" in item for item in result["operator_response"]["data_limitations"]))
         self.assertIn("Data limitations", result["answer"])
 
     def test_operator_actions_and_empty_history_are_explicit(self):
@@ -189,20 +242,54 @@ class TestIncidentAssistant(unittest.TestCase):
         self.assertTrue(any("freshness" in c.lower() or "runtime" in c.lower() for c in result["immediate_checks"]))
 
     def test_approved_sop_returns_steps_in_bottom_line_and_checks(self):
+        import json
+        from pathlib import Path
+        document_path = Path(__file__).parents[1] / "sop_documents" / "valve_restriction.json"
+        stored_steps = json.loads(document_path.read_text(encoding="utf-8"))["steps"]
         event = example_event()
         event["sop_match"] = {
             "sop_id": "SOP-P02-VLV-01",
             "sop_title": "Pump-02 Throttling Valve Restriction Remediation",
             "approved": True,
-            "steps": [
-                "Silence and acknowledge high pressure alarm ALM-P02-HP.",
-                "Inspect throttling control valve VLV-04-POS position feedback.",
-            ],
+            "steps": stored_steps[:2],
         }
-        result = build_assistant_response(event, "What are the steps to resolve this?")
+        # The repository's bundled demo procedure is intentionally unapproved.
+        # This injected source models a document-control record with explicit,
+        # traceable approval; its step text still comes from the stored file.
+        approved_document = json.loads(document_path.read_text(encoding="utf-8"))
+        approved_document.update({
+            "approved": True,
+            "approval_status": "approved",
+            "approval_reference": "DOC-CONTROL-TEST-001",
+        })
+        result = build_assistant_response(
+            event,
+            "What are the steps to resolve this?",
+            sop_document_loader=lambda sop_id: approved_document if sop_id == "SOP-P02-VLV-01" else None,
+        )
         self.assertEqual(result["uncertainty_status"], "source_retrieved")
         self.assertIn("Approved procedure SOP-P02-VLV-01", result["operator_response"]["bottom_line"])
         self.assertEqual(len(result["operator_response"]["recommended_checks"]), 2)
+        self.assertTrue(all(source["verified"] and source["approved"] for source in result["sources"]))
+        self.assertIn("Approved procedure SOP-P02-VLV-01", result["question_answer"])
+
+    def test_resolution_question_gets_safe_question_specific_fallback_without_inventing_sop(self):
+        event = example_event()
+        event["sop_match"] = {"sop_id": "SOP-NONE", "retrieved_chunks": [], "retrieval_status": "no_match"}
+        result = build_assistant_response(event, "What steps does the operator need to follow to resolve the problem?")
+        answer = result["question_answer"]
+        self.assertIn("1. Confirm the alarm's current state on the HMI", answer)
+        self.assertIn("7. Record the outcome", answer)
+        self.assertIn("not an approved procedure", answer)
+        self.assertFalse(result["solution"]["sop_status"]["approved"])
+
+    def test_natural_action_wording_is_recognized_as_a_resolution_question(self):
+        event = example_event()
+        event["sop_match"] = {"sop_id": "SOP-NONE", "retrieved_chunks": [], "retrieval_status": "no_match"}
+        result = build_assistant_response(event, "What actions to be taken to resolve this problem?")
+        self.assertIn("general read-only verification steps", result["question_answer"])
+        self.assertIn("consult the applicable plant-approved SOP", result["question_answer"])
+        self.assertNotIn("A physical cause has not been confirmed", result["question_answer"])
 
     def test_api_reports_unknown_incident_and_validation_errors(self):
         client = TestClient(create_app(orchestrator=FakeOrchestrator()))

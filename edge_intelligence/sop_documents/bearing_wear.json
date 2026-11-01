@@ -1,10 +1,15 @@
 {
   "sop_id": "SOP-C01-BRG-01",
-  "approved": true,
-  "document_status": "APPROVED PROCEDURE — EcoStruxure Machine Expert Verified",
+  "approved": false,
+  "document_status": "Locally authored demonstration procedure; operational approval status not verified.",
   "title": "Compressor-01 Drive-End Bearing Vibration & Fatigue Response",
   "equipment_id": "Compressor-01",
-  "tags": ["CMP-01-VIB", "CMP-01-CUR", "CMP-01-TMP", "ALM-C01-VB"],
+  "tags": [
+    "CMP-01-VIB",
+    "CMP-01-CUR",
+    "CMP-01-TMP",
+    "ALM-C01-VB"
+  ],
   "keywords": [
     "bearing vibration",
     "stator current rise",
@@ -28,5 +33,7 @@
     "Check motor stator current CMP-01-CUR to assess mechanical drag from bearing seizure.",
     "Engage auxiliary lube oil cooling pump and inspect bearing oil supply pressure.",
     "If vibration does not drop below 2.8 mm/s baseline, trip compressor and dispatch maintenance for mechanical bearing inspection."
-  ]
+  ],
+  "approval_status": "unverified",
+  "approval_reference": null
 }

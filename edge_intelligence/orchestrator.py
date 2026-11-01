@@ -260,20 +260,61 @@ class OpsLensOrchestrator:
                                "alarm": synthesized_alarm}
 
             # Stage 7: SOP Retrieval (writes to sop_matches)
-            sop_match = self.sop_retriever.retrieve(
-                story=story,
-                evidence=evidence,
-                primary_tag=candidate.primary_tag,
-                telemetry_snapshot=process_context,
-                persist=True
-            )
+            try:
+                sop_match = self.sop_retriever.retrieve(
+                    story=story,
+                    evidence=evidence,
+                    primary_tag=candidate.primary_tag,
+                    telemetry_snapshot=process_context,
+                    persist=True
+                )
+            except Exception as exc:
+                # SOP search is an optional enrichment stage. Keep the already
+                # persisted event story and evidence usable if search/indexing
+                # is unavailable, and record that state without inventing a
+                # no-match result or citing a document.
+                logger.warning(
+                    "[Orchestrator] SOP retrieval unavailable for event %s (%s)",
+                    event_id, type(exc).__name__,
+                )
+                sop_match = SopMatch(
+                    event_id=event_id,
+                    sop_id="SOP-NONE",
+                    sop_title="SOP retrieval unavailable",
+                    match_score=0.0,
+                    steps=[],
+                    source="unavailable",
+                    retrieval_method="unavailable",
+                    retrieval_status="unavailable",
+                    retrieval_error="retrieval_unavailable",
+                    why_retrieved={"retrieval_status": "unavailable"},
+                    retrieved_chunks=[],
+                    chunks=[],
+                )
+                try:
+                    self.db.save_sop_match(sop_match)
+                except Exception as persist_exc:
+                    logger.warning(
+                        "[Orchestrator] Could not persist SOP retrieval status for event %s (%s)",
+                        event_id, type(persist_exc).__name__,
+                    )
 
             # Stage 8: Guidance Generation (writes to guidance)
-            guidance = self.guidance_generator.generate(
-                story=story,
-                evidence=evidence,
-                sop_match=sop_match
-            )
+            try:
+                guidance = self.guidance_generator.generate(
+                    story=story,
+                    evidence=evidence,
+                    sop_match=sop_match
+                )
+            except Exception as exc:
+                # Guidance is optional too. The recorded incident/evidence
+                # response must still be broadcast and remain available to
+                # Ask OpsLens when this generator fails.
+                logger.warning(
+                    "[Orchestrator] Guidance unavailable for event %s (%s)",
+                    event_id, type(exc).__name__,
+                )
+                guidance = None
 
             # Build full event response
             full_event = self.get_full_event(event_id)
@@ -334,9 +375,20 @@ class OpsLensOrchestrator:
             return None
 
         # Determine overall incident resolution state
-        is_resolved = any(a.action_type.upper() in ("RESOLVE", "RESOLVED") for a in actions)
-        is_acked = any(a.action_type.upper() in ("ACKNOWLEDGE", "ACKNOWLEDGED") for a in actions)
-        status = "RESOLVED" if is_resolved else ("ACKNOWLEDGED" if is_acked else "OPEN")
+        status_getter = getattr(self.db, "get_event_status", None)
+        if status_getter:
+            status = status_getter(event_id)
+        else:
+            lifecycle_actions = [a for a in actions if a.action_type.upper() in (
+                "RESOLVE", "RESOLVED", "ACKNOWLEDGE", "ACKNOWLEDGED", "MARK_UNRESOLVED",
+            )]
+            latest_action = lifecycle_actions[-1].action_type.upper() if lifecycle_actions else None
+            status = {
+                "RESOLVE": "RESOLVED", "RESOLVED": "RESOLVED",
+                "ACKNOWLEDGE": "ACKNOWLEDGED", "ACKNOWLEDGED": "ACKNOWLEDGED",
+                "MARK_UNRESOLVED": "UNRESOLVED",
+            }.get(latest_action, "OPEN")
+        is_open = status not in ("RESOLVED", "ACKNOWLEDGED")
 
         candidate_obj = candidates[0] if candidates else None
         correlated_obj = correlated[0] if correlated else None
@@ -382,7 +434,7 @@ class OpsLensOrchestrator:
             "primary_tag": candidate_obj.primary_tag if candidate_obj else (story_obj.steps[0].tag if story_obj and story_obj.steps else "UNKNOWN"),
             "trigger_timestamp": candidate_obj.trigger_timestamp if candidate_obj else (story_obj.steps[0].timestamp if story_obj and story_obj.steps else None),
             "status": status,
-            "is_open": not is_resolved,
+            "is_open": is_open,
             "priority_interpretation": priority_interpretation,
             "urgency": urgency_data,
             "repeat_count": candidate_obj.repeat_count if candidate_obj else 1,

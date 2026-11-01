@@ -94,7 +94,8 @@ class SQLitePollingBroker(IStreamBroker):
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 """
-                SELECT id, tag, value, value_raw, timestamp, unit, equipment_id
+                SELECT id, tag, value, value_raw, timestamp, unit, equipment_id,
+                       received_timestamp, data_quality, data_source, connection_status
                 FROM tag_readings
                 WHERE id > ?
                 ORDER BY id ASC
@@ -110,7 +111,8 @@ class SQLitePollingBroker(IStreamBroker):
                 row["value_raw"],
                 row["timestamp"],
                 row["unit"],
-                row["equipment_id"]
+                row["equipment_id"], row["received_timestamp"], row["data_quality"],
+                row["data_source"], row["connection_status"]
             ) for row in rows]
         except Exception:
             return []
@@ -178,7 +180,7 @@ class SQLitePollingBroker(IStreamBroker):
                 rows = await asyncio.to_thread(self._fetch_rows_after, last_id)
 
                 if rows:
-                    for row_id, tag, val_num, val_raw, ts, unit, equip in rows:
+                    for row_id, tag, val_num, val_raw, ts, unit, equip, received_ts, quality, source, connection in rows:
                         if val_raw == "true":
                             typed_val: Union[float, bool, str] = True
                         elif val_raw == "false":
@@ -193,7 +195,11 @@ class SQLitePollingBroker(IStreamBroker):
                             value=typed_val,
                             timestamp=ts,
                             unit=unit,
-                            equipment_id=equip
+                            equipment_id=equip,
+                            received_timestamp=received_ts or ts,
+                            data_quality=quality or "UNKNOWN",
+                            data_source=source or "unknown",
+                            connection_status=connection or "unknown",
                         )
 
                         # Non-blocking fanout to matching subscribers
@@ -305,7 +311,8 @@ class TagStream:
 
                 where_sql = " AND ".join(clauses)
                 query = f"""
-                    SELECT tag, value, value_raw, timestamp, unit, equipment_id
+                    SELECT tag, value, value_raw, timestamp, unit, equipment_id,
+                           received_timestamp, data_quality, data_source, connection_status
                     FROM tag_readings
                     WHERE {where_sql}
                     ORDER BY timestamp ASC, id ASC
@@ -330,7 +337,11 @@ class TagStream:
                             value=val,
                             timestamp=row["timestamp"],
                             unit=row["unit"],
-                            equipment_id=row["equipment_id"]
+                            equipment_id=row["equipment_id"],
+                            received_timestamp=row["received_timestamp"] or row["timestamp"],
+                            data_quality=row["data_quality"] or "UNKNOWN",
+                            data_source=row["data_source"] or "unknown",
+                            connection_status=row["connection_status"] or "unknown",
                         )
                     )
                 return readings

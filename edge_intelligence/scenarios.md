@@ -30,6 +30,24 @@ graph TD
     end
 ```
 
+## Wastewater demonstration profile (added)
+
+The default synthetic scenarios now model a conventional municipal wastewater
+process around an **illustrative 50 MLD reference plant**. The values below are
+demo ranges only; they are not plant limits, permit conditions, or approved
+alarm setpoints. Replace them with site design data and approved alarm
+rationalization before any operational use.
+
+| Scenario | Main recorded sequence | Example reference values / units |
+|---|---|---|
+| `wet_well_high_level` | Lift discharge performance falls → wet-well level rises → high-high level input | About 2,083 m³/h average flow for 50 MLD; demo wet-well high-high at 85% |
+| `screen_differential_pressure` | Differential pressure rises across inlet screen → screen alarm | kPa transmitter; demo high trip at 4.0 kPa |
+| `low_do_ammonia_rise` | Aeration dissolved oxygen falls → ammonia rises → corresponding alarm inputs | mg/L; demo low-DO trip at 1.0 mg/L and high-ammonia trip at 8.0 mg/L |
+
+These scenarios are persisted through the existing timestamped telemetry,
+alarm prioritization, deduplication, event-correlation, evidence, and assistant
+pipeline. They are synthetic demonstration states and do not control equipment.
+
 ---
 
 ## 2. Master Tag Registry Baselines

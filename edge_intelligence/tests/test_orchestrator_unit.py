@@ -7,12 +7,13 @@ import uuid
 import sys
 import tempfile
 import shutil
+from unittest.mock import AsyncMock, Mock
 from pathlib import Path
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from models import CandidateEvent, EventStory, OperatorAction, TagReading, SopMatch, Guidance
+from models import CandidateEvent, CorrelatedEvent, CorrelatedDeviation, EventStory, OperatorAction, TagReading, SopMatch, Guidance
 from database import Database
 from orchestrator import OpsLensOrchestrator
 from api.routes import create_app
@@ -104,6 +105,48 @@ class TestOrchestratorUnit(unittest.TestCase):
         self.assertIsNone(result["sop_match"])
         self.assertIsNone(result["guidance"])
 
+    def test_sop_and_guidance_failures_do_not_erase_incident_evidence(self):
+        event_id = str(uuid.uuid4())
+        alarm_time = "2026-10-29T04:44:38.052481Z"
+        sequence_time = "2026-10-29T04:43:48.052481Z"
+        candidate = CandidateEvent(
+            event_id=event_id, primary_tag="ALM-SCR-110-DP", primary_alarm=True,
+            trigger_timestamp=alarm_time, raw_deviation_pct=100.0,
+            clustered_tags=["DPT-110-SCR", "ALM-SCR-110-DP"],
+        )
+        correlated = CorrelatedEvent(
+            **candidate.model_dump(),
+            correlated_deviations=[CorrelatedDeviation(
+                tag="DPT-110-SCR", deviation_pct=380.0,
+                timestamp=sequence_time, precedes_primary=True, topology_distance=1,
+            )],
+        )
+
+        async def persist_correlated(_candidate, **_kwargs):
+            self.db.save_correlated_event(correlated, equipment_id="InletWorks-01")
+            return correlated
+
+        self.orchestrator.correlator.correlate_event = AsyncMock(side_effect=persist_correlated)
+        self.orchestrator.sop_retriever.retrieve = Mock(side_effect=RuntimeError("index unavailable"))
+        self.orchestrator.guidance_generator.generate = Mock(side_effect=RuntimeError("guidance unavailable"))
+        self.orchestrator.alarm_synthesis.synthesize = Mock(return_value={})
+
+        pipeline = self.orchestrator.process_candidate_event(candidate)
+        try:
+            pipeline.send(None)
+        except StopIteration as completed:
+            result = completed.value
+        else:
+            pipeline.close()
+            self.fail("The mocked event pipeline unexpectedly suspended on external async work.")
+
+        self.assertEqual(result["event_id"], event_id)
+        self.assertIsNotNone(result["story"])
+        self.assertEqual(result["evidence"]["likely_contributor_tag"], "DPT-110-SCR")
+        self.assertEqual(result["sop_match"]["retrieval_status"], "unavailable")
+        self.assertEqual(result["sop_match"]["retrieved_chunks"], [])
+        self.assertIsNone(result["guidance"])
+
     def test_api_log_action_and_open_events(self):
         """Verify API route for logging actions and checking open events."""
         event_id = str(uuid.uuid4())
@@ -155,6 +198,69 @@ class TestOrchestratorUnit(unittest.TestCase):
             "event_id": event_id, "operator": "test", "action_type": "RESOLVE"
         })
         self.assertEqual(accepted.status_code, 200)
+
+    def _save_high_pressure_story(self, event_id, alarm_time="2026-10-01T10:00:00Z"):
+        self.db.save_event_story(EventStory(
+            event_id=event_id,
+            steps=[{"step_number": 1, "tag": "ALM-P02-HP", "timestamp": alarm_time,
+                    "description": "High pressure alarm active", "value_before": False, "value_after": True}],
+            causal_label="Pump-02 high pressure"
+        ))
+
+    def test_active_alarm_input_cannot_be_resolved(self):
+        event_id = str(uuid.uuid4())
+        self._save_high_pressure_story(event_id)
+        self.db.insert_reading(TagReading(
+            tag="ALM-P02-HP", value=True, timestamp="2026-10-01T10:00:02Z",
+            unit="status", equipment_id="Pump-02"
+        ))
+        response = self.client.post("/api/actions", json={
+            "event_id": event_id, "operator": "test", "action_type": "RESOLVE"
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(self.db.is_event_resolved(event_id))
+
+    def test_stale_clear_timestamp_with_later_wall_clock_text_cannot_resolve(self):
+        event_id = str(uuid.uuid4())
+        self._save_high_pressure_story(event_id)
+        # 10:30 at UTC+1 is 09:30Z, so this is older than the 10:00Z alarm
+        # despite its lexicographically later timestamp string.
+        stale = TagReading(
+            tag="ALM-P02-HP", value=False, timestamp="2026-10-01T10:30:00+01:00",
+            unit="status", equipment_id="Pump-02"
+        )
+        self.db.insert_reading(stale)
+        latest = self.db.get_latest_reading("ALM-P02-HP")
+        self.assertEqual(latest.timestamp, stale.timestamp)
+        state = self.client.get(f"/api/events/{event_id}").json()["runtime_alarm_state"]
+        self.assertFalse(state["is_later_than_alarm"])
+        response = self.client.post("/api/actions", json={
+            "event_id": event_id, "operator": "test", "action_type": "RESOLVE"
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(self.db.is_event_resolved(event_id))
+
+    def test_subsequent_clear_sample_enables_operator_confirmation_and_resolution(self):
+        event_id = str(uuid.uuid4())
+        self._save_high_pressure_story(event_id)
+        self.db.insert_reading(TagReading(
+            tag="ALM-P02-HP", value=True, timestamp="2026-10-01T10:00:01Z",
+            unit="status", equipment_id="Pump-02"
+        ))
+        self.db.insert_reading(TagReading(
+            tag="ALM-P02-HP", value=False, timestamp="2026-10-01T12:00:02+02:00",
+            unit="status", equipment_id="Pump-02"
+        ))
+        state = self.client.get(f"/api/events/{event_id}").json()["runtime_alarm_state"]
+        self.assertFalse(state["active"])
+        self.assertTrue(state["is_later_than_alarm"])
+        response = self.client.post("/api/actions", json={
+            "event_id": event_id, "operator": "test", "action_type": "RESOLVE"
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.db.is_event_resolved(event_id))
+        full = self.client.get(f"/api/events/{event_id}").json()
+        self.assertTrue(any(action["action_type"] == "RESOLVE" for action in full["actions"]))
 
     def test_alarm_priority_interpreter_never_overrides_source_severity(self):
         result = AlarmPriorityInterpreter.interpret("Critical", related_signal_count=3)

@@ -13,12 +13,15 @@ export default function NextBestAction({
   isVisible = true,
   isResolved = false,
   alarmClearObserved = false,
+  actionError = '',
+  actionSubmitting = false,
+  referenceOnly = false,
 }) {
   if (!isIncident || !isVisible) {
     return (
-      <div className="flex min-h-[80px] items-center justify-center gap-2 rounded-lg border border-[#1a2535] bg-[#0d1420] p-4 text-xs text-slate-500">
-        <Zap className="h-4 w-4 shrink-0 text-slate-600" />
-        Action guidance pending
+      <div className="flex min-h-[80px] items-center justify-center gap-2 rounded-xl border border-[#D8E2DA] bg-white p-4 text-xs text-[#64736A]">
+        <Zap className="h-4 w-4 shrink-0 text-[#64736A]" />
+        Guidance unavailable
       </div>
     );
   }
@@ -33,14 +36,14 @@ export default function NextBestAction({
     ? guidance.cited_sop_id : null;
 
   return (
-    <div className="rounded-xl border border-[#1a2535] bg-[#0d1420] p-4">
+    <div className="rounded-xl border border-[#D8E2DA] bg-white p-4 shadow-sm">
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
-        <div className="text-[10px] font-mono uppercase tracking-widest text-[#00D65A]">
+        <div className="text-[10px] font-mono uppercase tracking-widest text-[#009530] font-bold">
           Next-Best Actions
         </div>
         {citedSopId && (
-          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#00A344]/10 border border-[#00A344]/30 text-[#00D65A] whitespace-nowrap">
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#E8F5EC] border border-[#009530]/30 text-[#006B35] font-semibold whitespace-nowrap">
             {citedSopId}
           </span>
         )}
@@ -48,12 +51,10 @@ export default function NextBestAction({
 
       {/* Recorded action banner */}
       {recordedAction && (
-        <div className="mb-3 flex items-center gap-2 bg-emerald-950/50 border border-emerald-500/30 rounded-lg px-3 py-2">
-          <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
-          <span className="text-xs text-emerald-300 font-semibold">
-            {recordedAction.action_type === 'RESOLVE'
-              ? 'Operator-confirmed runtime alarm state recorded.'
-              : `[${recordedAction.action_type}] recorded → Shift Handover`}
+        <div className="mb-3 flex items-center gap-2 bg-[#E8F5EC] border border-[#009530]/40 rounded-lg px-3 py-2 text-[#006B35]">
+          <CheckCircle2 className="h-4 w-4 text-[#009530] shrink-0" />
+          <span className="text-xs font-semibold">
+            {{ RESOLVE: 'Resolution recorded', MARK_UNRESOLVED: 'Incident marked unresolved', ANNOTATE: 'Event note recorded', VERIFY: 'Verification recorded', INSPECT: 'Inspection recorded' }[recordedAction.action_type] || 'Operator action recorded'}
           </span>
         </div>
       )}
@@ -63,61 +64,73 @@ export default function NextBestAction({
         <ol className="space-y-2 mb-3">
           {displayActions.map((item, idx) => (
             <li key={idx} className="flex items-start gap-2.5 text-sm">
-              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#00A344]/20 border border-[#00A344]/40 text-[#00D65A] text-[10px] font-black">
+              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#E8F5EC] border border-[#009530]/40 text-[#006B35] text-[10px] font-black">
                 {idx + 1}
               </span>
-              <span className="text-slate-200 leading-snug">{item.action}</span>
+              <span className="text-[#26352C] leading-snug">{item.action}</span>
             </li>
           ))}
         </ol>
       ) : (
-        <div className="mb-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-xs text-amber-200">
-          Operator verification required. No supported next step is available from the retrieved procedure.
+        <div className="mb-3 rounded-lg border border-[#B7791F]/30 bg-[#FEF0C7] px-3 py-2.5 text-xs text-[#B7791F]">
+          {referenceOnly
+            ? 'REFERENCE ONLY — NOT APPROVED. The retrieved document is shown for review; its steps are not presented as authorized actions.'
+            : 'No approved operating guidance is available.'}
         </div>
       )}
 
       {/* Operator action row */}
-      <div className="flex flex-wrap gap-2 border-t border-[#1a2535] pt-3">
+      <div className="flex flex-wrap gap-2 border-t border-[#D8E2DA] pt-3">
         <button
-          disabled={isResolved}
+          disabled={isResolved || actionSubmitting}
           onClick={() => onExecuteAction('VERIFY', `Verified ${primaryTag || 'component'}`)}
-          className="flex items-center gap-1.5 rounded-lg border border-[#1a2535] bg-[#0a0e16] px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide text-slate-300 hover:border-emerald-500/50 hover:bg-emerald-950/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+          className="flex items-center gap-1.5 rounded-lg border border-[#D8E2DA] bg-[#F3F6F3] hover:bg-[#E8F5EC] hover:border-[#009530]/50 text-[#26352C] px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
         >
-          <Wrench className="h-3 w-3 text-emerald-400" />Verify
+          <Wrench className="h-3 w-3 text-[#009530]" />Verify
         </button>
 
         <button
-          disabled={isResolved}
+          disabled={isResolved || actionSubmitting}
           onClick={() => onExecuteAction('INSPECT', `Inspected ${equipmentId}`)}
-          className="flex items-center gap-1.5 rounded-lg border border-[#1a2535] bg-[#0a0e16] px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide text-slate-300 hover:border-blue-500/50 hover:bg-blue-950/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+          className="flex items-center gap-1.5 rounded-lg border border-[#D8E2DA] bg-[#F3F6F3] hover:bg-[#EFF8FF] hover:border-[#155EEF]/50 text-[#26352C] px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
         >
-          <Eye className="h-3 w-3 text-blue-400" />Inspect
+          <Eye className="h-3 w-3 text-[#155EEF]" />Inspect
         </button>
 
         <button
           onClick={onOpenSopModal}
-          className="flex items-center gap-1.5 rounded-lg border border-[#1a2535] bg-[#0a0e16] px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide text-slate-300 hover:border-purple-500/50 hover:bg-purple-950/20 transition-all"
+          className="flex items-center gap-1.5 rounded-lg border border-[#D8E2DA] bg-[#F3F6F3] hover:bg-[#F9F5FF] hover:border-[#7F56D9]/50 text-[#26352C] px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide transition-all cursor-pointer"
         >
-          <CheckSquare className="h-3 w-3 text-purple-400" />View SOP
+          <CheckSquare className="h-3 w-3 text-[#7F56D9]" />View SOP
         </button>
 
-        <button
-          disabled={isResolved || !alarmClearObserved}
-          onClick={() => onExecuteAction('RESOLVE', 'Operator confirmed the alarm was clear in the runtime.')}
-          className="ml-auto flex items-center gap-1.5 rounded-lg bg-[#00A344] hover:bg-[#00D65A] px-4 py-1.5 text-[11px] font-black uppercase tracking-wide text-black shadow-sm shadow-[#00A344]/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <Check className="h-3.5 w-3.5 stroke-[3]" />
-          {isResolved ? 'Clear recorded' : alarmClearObserved ? 'Confirm runtime clear' : 'Await alarm clear'}
-        </button>
+        {isResolved ? (
+          <div role="status" className="ml-auto flex items-center gap-1.5 rounded-lg border border-[#009530]/30 bg-[#E8F5EC] px-4 py-1.5 text-[11px] font-bold uppercase tracking-wide text-[#006B35]">
+            <Check className="h-3.5 w-3.5 stroke-[3]" />Resolution recorded
+          </div>
+        ) : alarmClearObserved ? (
+          <button
+            onClick={() => onExecuteAction('RESOLVE', 'Operator confirmed the alarm was clear in the runtime.')}
+            disabled={actionSubmitting}
+            className="ml-auto flex items-center gap-1.5 rounded-lg bg-[#009530] hover:bg-[#006B35] px-4 py-1.5 text-[11px] font-black uppercase tracking-wide text-white shadow-sm transition-all cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+          >
+            <Check className="h-3.5 w-3.5 stroke-[3]" />Confirm runtime clear
+          </button>
+        ) : (
+          <div role="status" aria-live="polite" className="ml-auto flex items-center gap-1.5 rounded-lg border border-[#B7791F]/30 bg-[#FEF0C7] px-4 py-1.5 text-[11px] font-bold uppercase tracking-wide text-[#B7791F]">
+            <CheckCircle2 className="h-3.5 w-3.5" />Awaiting source clear
+          </div>
+        )}
       </div>
 
       {!isResolved && (
-        <p className="mt-1.5 text-[10px] text-slate-600">
+        <p className="mt-1.5 text-[10px] text-[#64736A]">
           {alarmClearObserved
-            ? 'A timestamped clear state has been observed. Operator confirmation is still required.'
-            : 'Resolution is locked until a later source reading reports the alarm input clear.'}
+            ? 'Confirm the clear alarm state to record resolution.'
+            : 'Resolution requires a later source-clear reading and operator confirmation.'}
         </p>
       )}
+      {actionError && <p role="alert" className="mt-2 rounded border border-[#D92D20]/30 bg-[#FEF3F2] px-3 py-2 text-xs text-[#D92D20]">{actionError}</p>}
     </div>
   );
 }

@@ -45,6 +45,11 @@ class TagReading(BaseModel):
     # Alarm priority/severity passed through from the configured source when supplied.
     # This is not inferred from OpsLens evidence weights.
     alarm_severity: Optional[str] = None
+    # Provenance metadata is additive; legacy/synthetic callers remain valid.
+    received_timestamp: str = Field(default_factory=current_iso_utc)
+    data_quality: Literal["VALID", "DEGRADED", "STALE", "INVALID", "UNKNOWN"] = "UNKNOWN"
+    data_source: str = "unknown"
+    connection_status: str = "unknown"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -55,6 +60,10 @@ class TagReading(BaseModel):
             "equipment_id": self.equipment_id,
             "alarm_state": self.alarm_state,
             "alarm_severity": self.alarm_severity,
+            "received_timestamp": self.received_timestamp,
+            "data_quality": self.data_quality,
+            "data_source": self.data_source,
+            "connection_status": self.connection_status,
         }
 
 
@@ -75,6 +84,7 @@ class TagRegistryEntry(BaseModel):
     severity_weight: float = Field(ge=0.0, le=1.0)
     topology_upstream: List[str] = Field(default_factory=list)
     short_label: Optional[str] = None
+    baseline_status: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -90,6 +100,8 @@ class TagRegistryEntry(BaseModel):
         }
         if self.short_label is not None:
             d["short_label"] = self.short_label
+        if self.baseline_status is not None:
+            d["baseline_status"] = self.baseline_status
         return d
 
 
@@ -173,6 +185,12 @@ class CorrelatedDeviation(BaseModel):
     timestamp: str
     precedes_primary: bool
     topology_distance: int
+    value_before: Optional[Union[float, bool, str]] = None
+    value_after: Optional[Union[float, bool, str]] = None
+    unit: Optional[str] = None
+    data_source: Optional[str] = None
+    data_quality: Optional[str] = None
+    connection_status: Optional[str] = None
 
 
 class CorrelatedEvent(CandidateEvent):
@@ -192,8 +210,12 @@ class EventStoryStep(BaseModel):
     tag: str
     timestamp: str
     description: str
-    value_before: float
-    value_after: float
+    value_before: Optional[Union[float, bool, str]] = None
+    value_after: Optional[Union[float, bool, str]] = None
+    unit: Optional[str] = None
+    data_source: Optional[str] = None
+    data_quality: Optional[str] = None
+    connection_status: Optional[str] = None
 
 
 class EventStory(BaseModel):
@@ -247,11 +269,14 @@ class SopMatch(BaseModel):
     embedding_model: str = "all-MiniLM-L6-v2"
     query_context: Optional[str] = None         # full contextual query that was embedded
     steps: List[str]
-    source: Literal["bm25", "embedding"]
+    source: Literal["bm25", "embedding", "unavailable"]
     why_retrieved: Optional[Dict[str, Any]] = None
     retrieved_chunks: Optional[List[Dict[str, Any]]] = None   # top-K Qdrant chunks
     chunks: Optional[List[Dict[str, Any]]] = None
     rag_trace: Optional[Dict[str, Any]] = None                # full audit record
+    # Retrieval outcome is independent of the incident-analysis result.
+    retrieval_status: str = "match_found"  # match_found | no_match | unavailable
+    retrieval_error: Optional[str] = None   # sanitized reason code only
 
 
 class Guidance(BaseModel):
@@ -309,6 +334,10 @@ class ContextReading(BaseModel):
     timestamp: str
     timestamp_utc: str
     source: str = "sqlite.tag_readings"
+    received_timestamp: Optional[str] = None
+    data_quality: str = "UNKNOWN"
+    data_source: str = "unknown"
+    connection_status: str = "unknown"
 
 
 class ContextEventRecord(BaseModel):
@@ -383,3 +412,4 @@ class IncidentContext(BaseModel):
     hypotheses: List[str] = Field(default_factory=list)
     duplicate_readings_removed: int = 0
     assembly_latency_ms: float
+    timings_ms: Dict[str, float] = Field(default_factory=dict)

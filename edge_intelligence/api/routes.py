@@ -13,12 +13,16 @@ Exposes REST and SSE/WebSocket endpoints wrapping:
 
 import json
 import asyncio
+import copy
+import logging
 import os
+import threading
 import uuid
+from time import perf_counter
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import BackgroundTasks, FastAPI, APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -26,11 +30,113 @@ from orchestrator import OpsLensOrchestrator
 from scenarios import list_available_scenarios
 from generator import SyntheticDataGenerator
 from tag_registry import TAG_REGISTRY
-from assistant import answer_incident_question
+from assistant import answer_incident_question, resolve_event_sop_reference
 from assistant_cache import cache_key, clear as clear_assistant_cache, context_fingerprint, get as cache_get, put as cache_put, question_is_volatile
 from context_builder import ContextBuilder, ContextEventNotFound, InvalidContextTimestamp, parse_timestamp
 from models import IncidentContext, TagReading
 from llm_provider import configuration_error, provider_status, selected_provider
+from adapters.opcua_adapter import OPCUAAdapter
+
+logger = logging.getLogger(__name__)
+_sop_ingestion_jobs: Dict[str, Dict[str, Any]] = {}
+_sop_ingestion_jobs_lock = threading.Lock()
+_assistant_request_flights: Dict[str, Dict[str, Any]] = {}
+_assistant_request_flights_lock = threading.Lock()
+
+
+def _update_sop_ingestion_job(job_id: str, stage: Dict[str, Any]) -> None:
+    with _sop_ingestion_jobs_lock:
+        job = _sop_ingestion_jobs.get(job_id)
+        if not job:
+            return
+        stages = list(job.get("stages") or [])
+        index = next((i for i, item in enumerate(stages) if item.get("name") == stage.get("name")), None)
+        if index is None:
+            stages.append(dict(stage))
+        else:
+            stages[index] = dict(stage)
+        job["stages"] = stages
+        job["current_stage"] = stage.get("name")
+        job["status"] = "processing"
+
+
+def _run_sop_ingestion_job(job_id: str, pdf_bytes: bytes, filename: str, metadata: Dict[str, str]) -> None:
+    """Run PDF ingestion in a background task and expose stage-safe progress."""
+    try:
+        from pdf_sop_ingestion import PdfExtractionError, PdfIndexingError, ingest_pdf
+        from sop_retriever import get_qdrant_store
+        result = ingest_pdf(
+            pdf_bytes, filename, metadata, get_qdrant_store(),
+            progress_callback=lambda stage: _update_sop_ingestion_job(job_id, stage),
+        )
+        with _sop_ingestion_jobs_lock:
+            job = _sop_ingestion_jobs.get(job_id)
+            if job is not None:
+                job.update({
+                    "status": "completed", "current_stage": "complete",
+                    "stages": result.get("stages", []), "data": result, "error": None,
+                })
+    except PdfExtractionError as exc:
+        with _sop_ingestion_jobs_lock:
+            job = _sop_ingestion_jobs.get(job_id)
+            if job is not None:
+                manual = "scanned" in str(exc).lower() or "ocr" in str(exc).lower()
+                job.update({
+                    "status": "failed", "current_stage": "extraction_failed",
+                    "error": {"stage": "extraction_failed", "message": str(exc), "manual_review_required": manual},
+                    "stages": list(job.get("stages") or []) + [{
+                        "name": "Text extraction failed", "status": "failed", "complete": False,
+                        "detail": "OCR or manual review is required." if manual else "No extracted text was indexed.",
+                    }],
+                })
+    except PdfIndexingError as exc:
+        with _sop_ingestion_jobs_lock:
+            job = _sop_ingestion_jobs.get(job_id)
+            if job is not None:
+                job.update({
+                    "status": "failed", "current_stage": "indexing_failed",
+                    "error": {"stage": "indexing_failed", "code": exc.code, "message": str(exc)},
+                    "stages": list(job.get("stages") or []) + [{
+                        "name": "Indexing failed", "status": "failed", "complete": False,
+                        "detail": "The PDF was not reported as indexed.",
+                    }],
+                })
+    except ValueError as exc:
+        with _sop_ingestion_jobs_lock:
+            job = _sop_ingestion_jobs.get(job_id)
+            if job is not None:
+                job.update({
+                    "status": "failed", "current_stage": "validation_failed",
+                    "error": {"stage": "validation_failed", "message": str(exc)},
+                    "stages": list(job.get("stages") or []) + [{
+                        "name": "Document validation failed", "status": "failed", "complete": False,
+                        "detail": "Check the PDF file and required document metadata.",
+                    }],
+                })
+    except Exception as exc:
+        logger.exception("SOP ingestion job failed job_id=%s error_type=%s", job_id, type(exc).__name__)
+        with _sop_ingestion_jobs_lock:
+            job = _sop_ingestion_jobs.get(job_id)
+            if job is not None:
+                job.update({
+                    "status": "failed", "current_stage": "ingestion_failed",
+                    "error": {"stage": "ingestion_failed", "message": "SOP ingestion failed. No success was recorded."},
+                    "stages": list(job.get("stages") or []) + [{
+                        "name": "Ingestion failed", "status": "failed", "complete": False,
+                        "detail": "No success was recorded; inspect backend diagnostics.",
+                    }],
+                })
+
+
+def _incident_failure(event_id: str, code: str, message: str) -> HTTPException:
+    """Log diagnostic context and return a safe, actionable operator error."""
+    request_id = uuid.uuid4().hex[:12]
+    logger.exception("%s request_id=%s event_id=%s", code, request_id, event_id)
+    return HTTPException(
+        status_code=500,
+        detail=message,
+        headers={"X-Request-ID": request_id, "X-OpsLens-Error-Code": code},
+    )
 
 
 def _load_bundled_sop(sop_id: str) -> Optional[Dict[str, Any]]:
@@ -79,13 +185,48 @@ class ActionRequest(BaseModel):
     timestamp: Optional[str] = None
 
 
+class MarkUnresolvedRequest(BaseModel):
+    operator: str = Field(min_length=1, max_length=120)
+    reason: Optional[str] = Field(default=None, max_length=1000)
+    timestamp: Optional[str] = None
+
+
 class HandoverRequest(BaseModel):
     shift_start: str
     shift_end: str
 
 
+def _timestamp_is_after(value: Optional[str], reference: Optional[str]) -> bool:
+    """Compare source timestamps as instants; malformed values never satisfy the clear interlock."""
+    if not value or not reference:
+        return False
+    try:
+        return parse_timestamp(value) > parse_timestamp(reference)
+    except InvalidContextTimestamp:
+        return False
+
+
+def _is_clear_alarm_reading(
+    reading: Any,
+    alarm_tag: Optional[str],
+    alarm_timestamp: Optional[str],
+    equipment_id: Optional[str] = None,
+    minimum_timestamp: Optional[str] = None,
+) -> bool:
+    """A clear interlock requires the correct source tag/equipment and a later false-like sample."""
+    if reading is None or not alarm_tag or getattr(reading, "tag", None) != alarm_tag:
+        return False
+    clear_value = getattr(reading, "value", None) is False or str(getattr(reading, "value", "")).strip().lower() in ("false", "0", "clear", "inactive", "off")
+    observed_equipment = getattr(reading, "equipment_id", None)
+    equipment_matches = not equipment_id or bool(observed_equipment and str(observed_equipment).casefold() == str(equipment_id).casefold())
+    reading_timestamp = getattr(reading, "timestamp", None)
+    newer_than_alarm = _timestamp_is_after(reading_timestamp, alarm_timestamp)
+    newer_than_minimum = not minimum_timestamp or _timestamp_is_after(reading_timestamp, minimum_timestamp)
+    return bool(clear_value and equipment_matches and newer_than_alarm and newer_than_minimum)
+
+
 class ScenarioRunRequest(BaseModel):
-    scenario_id: str = "valve_restriction"
+    scenario_id: str = "wet_well_high_level"
     speed_multiplier: float = 10.0
 
 
@@ -130,6 +271,7 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
     )
 
     orch = orchestrator if orchestrator is not None else OpsLensOrchestrator()
+    app.state.opcua_adapter = OPCUAAdapter()
     context_builder = ContextBuilder(
         db=orch.db,
         event_loader=orch.get_full_event,
@@ -138,6 +280,14 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
     # In-memory lifecycle state for the explicitly synthetic demonstration.
     # Production adapters continue to report their own readings and states.
     simulation_state: Dict[str, Any] = {"status": "idle", "scenario_id": None, "event_id": None, "generator": None}
+    # Rolling measurements of context assembly latency (in milliseconds)
+    context_assembly_measurements: List[float] = []
+    context_assembly_failures: List[Dict[str, Any]] = []
+
+    def record_context_failure(started: float, reason: str) -> None:
+        context_assembly_failures.append({"latency_ms": round((perf_counter() - started) * 1000, 3), "reason": reason})
+        if len(context_assembly_failures) > 200:
+            del context_assembly_failures[:-200]
 
     @app.get("/")
     async def root():
@@ -309,10 +459,13 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
         full_event = orch.get_full_event(event_id)
         if full_event is None:
             raise HTTPException(status_code=404, detail=f"Event '{event_id}' not found.")
+        full_event["sop_resolution"], full_event["resolved_sop_sources"] = resolve_event_sop_reference(full_event)
         steps = (full_event.get("story") or {}).get("steps") or []
         alarm_step = next((step for step in reversed(steps) if str(step.get("tag", "")).startswith("ALM-")), None)
         alarm_tag = (alarm_step or {}).get("tag")
         latest = orch.db.get_latest_reading(alarm_tag) if alarm_tag else None
+        alarm_timestamp = (alarm_step or {}).get("timestamp")
+        later_than_alarm = bool(latest and _timestamp_is_after(latest.timestamp, alarm_timestamp))
         if latest:
             is_active = latest.value is True or str(latest.value).strip().lower() in ("true", "1", "active", "on")
             full_event["runtime_alarm_state"] = {
@@ -321,10 +474,15 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
                 "observed": True,
                 "timestamp": latest.timestamp,
                 "value": latest.value,
+                "is_later_than_alarm": later_than_alarm,
+                "received_timestamp": latest.received_timestamp,
+                "data_quality": latest.data_quality,
+                "data_source": latest.data_source,
+                "connection_status": latest.connection_status,
                 "source": "synthetic_simulator" if simulation_state.get("event_id") == event_id else "timestamped_reading",
             }
         else:
-            full_event["runtime_alarm_state"] = {"tag": alarm_tag, "active": None, "observed": False, "timestamp": None}
+            full_event["runtime_alarm_state"] = {"tag": alarm_tag, "active": None, "observed": False, "timestamp": None, "is_later_than_alarm": False}
         return full_event
 
     @router.get("/events/{event_id}/context", response_model=IncidentContext)
@@ -370,25 +528,53 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
         except TypeError:
             return []
 
-    def _answer_question(req: AssistantAskRequest) -> Dict[str, Any]:
+    def _answer_question_impl(req: AssistantAskRequest, progress_callback=None) -> Dict[str, Any]:
         full_event = orch.get_full_event(req.event_id)
         if full_event is None:
             raise HTTPException(status_code=404, detail="Selected incident was not found.")
+        if progress_callback:
+            progress_callback("preparing_context")
         conversation_id = _bind_conversation(req.event_id, req.conversation_id)
+        context_started = perf_counter()
         try:
             context = context_builder.build(req.event_id, req.reference_timestamp, event_record=full_event)
         except ContextEventNotFound:
+            record_context_failure(context_started, "event_not_found")
             raise HTTPException(status_code=404, detail="Selected incident was not found.")
         except InvalidContextTimestamp as exc:
+            record_context_failure(context_started, "invalid_or_missing_event_timestamp")
             raise HTTPException(status_code=422, detail=str(exc))
+        except Exception:
+            record_context_failure(context_started, "context_assembly_error")
+            raise
         context_payload = context.model_dump(mode="json")
+        if progress_callback:
+            progress_callback("evidence_ready")
+        if context.assembly_latency_ms is not None and context.assembly_latency_ms >= 0:
+            context_assembly_measurements.append(float(context.assembly_latency_ms))
+            if len(context_assembly_measurements) > 200:
+                del context_assembly_measurements[:-200]
         alarm_state = context_payload["selected_event"].get("alarm_state")
-        full_event["runtime_alarm_state"] = ({
-            "tag": alarm_state["tag"], "active": alarm_state["value"],
-            "observed": True, "timestamp": alarm_state["timestamp"],
-            "value": alarm_state["value"], "source": alarm_state["source"],
-        } if alarm_state else {"tag": context_payload["selected_event"].get("alarm_id"),
-                              "active": None, "observed": False, "timestamp": None})
+        story_steps = (full_event.get("story") or {}).get("steps") or []
+        alarm_step = next((step for step in reversed(story_steps)
+                           if str(step.get("tag", "")).startswith("ALM-")), None)
+        alarm_tag = (alarm_state or {}).get("tag") or context_payload["selected_event"].get("alarm_id")
+        latest_alarm = orch.db.get_latest_reading(alarm_tag) if alarm_tag else None
+        alarm_timestamp = (alarm_step or {}).get("timestamp") or full_event.get("trigger_timestamp")
+        if latest_alarm:
+            full_event["runtime_alarm_state"] = {
+                "tag": alarm_tag,
+                "active": latest_alarm.value is True or str(latest_alarm.value).strip().lower() in ("true", "1", "active", "on"),
+                "observed": True,
+                "timestamp": latest_alarm.timestamp,
+                "value": latest_alarm.value,
+                "source": "sqlite.tag_readings",
+                "is_later_than_alarm": _timestamp_is_after(latest_alarm.timestamp, alarm_timestamp),
+            }
+        else:
+            full_event["runtime_alarm_state"] = {"tag": alarm_tag, "active": None,
+                                                  "observed": False, "timestamp": None,
+                                                  "is_later_than_alarm": False}
         history_limit = int(os.environ.get("OPSLENS_ASSISTANT_HISTORY_LIMIT", "8"))
         history = []
         if hasattr(orch.db, "get_assistant_messages"):
@@ -411,6 +597,7 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
             conversation_id=conversation_id,
             conversation=history,
             assembly_latency_ms=context.assembly_latency_ms,
+            progress_callback=progress_callback,
         )
         result["cache_hit"] = False
         if hasattr(orch.db, "save_assistant_message"):
@@ -420,44 +607,132 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
             cache_put(key, result)
         return result
 
+    def _answer_question(req: AssistantAskRequest, progress_callback=None) -> Dict[str, Any]:
+        """Coalesce identical in-flight incident questions before context/RAG/LLM work."""
+        request_key = json.dumps({
+            "event_id": req.event_id,
+            "question": req.question.strip().casefold(),
+            "reference_timestamp": req.reference_timestamp,
+            "conversation_id": req.conversation_id,
+        }, sort_keys=True, default=str)
+        with _assistant_request_flights_lock:
+            state = _assistant_request_flights.get(request_key)
+            owner = state is None
+            if owner:
+                state = {"event": threading.Event(), "result": None, "error": None}
+                _assistant_request_flights[request_key] = state
+
+        if not owner:
+            if progress_callback:
+                progress_callback("waiting_for_identical_analysis")
+            wait_seconds = max(0.1, float(os.environ.get("OPSLENS_ASSISTANT_SINGLEFLIGHT_TIMEOUT", "30")))
+            if not state["event"].wait(wait_seconds):
+                raise HTTPException(status_code=503, detail="An identical incident analysis is still in progress. Retry shortly.")
+            if state["error"] is not None:
+                raise state["error"]
+            result = copy.deepcopy(state["result"])
+            result["cache_hit"] = True
+            result["coalesced_request"] = True
+            return result
+
+        try:
+            result = _answer_question_impl(req, progress_callback)
+            state["result"] = result
+            return result
+        except Exception as exc:
+            state["error"] = exc
+            raise
+        finally:
+            state["event"].set()
+            with _assistant_request_flights_lock:
+                if _assistant_request_flights.get(request_key) is state:
+                    _assistant_request_flights.pop(request_key, None)
+
     @router.post("/assistant/ask", response_model=AssistantAskResponse)
     async def ask_ops_lens(req: AssistantAskRequest):
         """Answer an incident-scoped question using its persisted 30-minute context."""
-        return _answer_question(req)
+        try:
+            # SQLite, optional vector lookup and synchronous provider clients
+            # must not block the ASGI event loop used by streaming/HMI traffic.
+            return await asyncio.to_thread(_answer_question, req)
+        except HTTPException:
+            raise
+        except Exception:
+            raise _incident_failure(
+                req.event_id,
+                "INCIDENT_ASSESSMENT_FAILED",
+                "The incident assessment could not be completed. Retry; if it continues, share the request ID with an engineer.",
+            )
 
     @router.post("/assistant/ask/stream")
     async def ask_ops_lens_stream(req: AssistantAskRequest):
-        """SSE assistant response with real-time token streaming and status stages."""
+        """SSE progress plus a fully validated response (draft tokens are never exposed)."""
         def sse(event_name: str, payload: Dict[str, Any]) -> str:
             return f"event: {event_name}\ndata: {json.dumps(payload, default=str)}\n\n"
 
         async def generate():
-            # Real-time stage 1: Notify operator immediately that context assembly has started
-            yield sse("status", {
-                "stage": "assembling_context",
-                "message": "Fetching 30-minute time-series window & alarm metadata...",
-                "advisory_only": True
-            })
-            await asyncio.sleep(0.02)
-            
+            stage_messages = {
+                "preparing_context": "Preparing incident context from recorded telemetry and alarm metadata…",
+                "waiting_for_identical_analysis": "Waiting for the identical incident assessment already in progress…",
+                "evidence_ready": "Recorded readings, timeline and evidence are available.",
+                "retrieving_procedure": "Checking procedure references and approval status…",
+                "generating_explanation": "Generating explanation and validating numeric claims…",
+                "deterministic_analysis_available": "Deterministic record-grounded analysis is available.",
+            }
+            progress_queue: asyncio.Queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def report_progress(stage: str) -> None:
+                loop.call_soon_threadsafe(progress_queue.put_nowait, stage)
+
             try:
-                # Runs ContextBuilder (<2s SLA) + RAG SOP retrieval + LLM with safety validation
-                result = await asyncio.to_thread(_answer_question, req)
+                # Stream only stages emitted by the work as they actually occur.
+                worker = asyncio.create_task(asyncio.to_thread(_answer_question, req, report_progress))
+                while not worker.done():
+                    try:
+                        stage = await asyncio.wait_for(progress_queue.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        continue
+                    yield sse("status", {"stage": stage, "message": stage_messages.get(stage, stage), "advisory_only": True})
+                result = await worker
+                while not progress_queue.empty():
+                    stage = progress_queue.get_nowait()
+                    yield sse("status", {"stage": stage, "message": stage_messages.get(stage, stage), "advisory_only": True})
             except HTTPException as exc:
-                yield sse("error", {"detail": exc.detail, "status": exc.status_code})
+                yield sse("error", {
+                    "detail": exc.detail,
+                    "status": exc.status_code,
+                    "code": (exc.headers or {}).get("X-OpsLens-Error-Code"),
+                    "request_id": (exc.headers or {}).get("X-Request-ID"),
+                })
                 return
-            except Exception as exc:
-                yield sse("error", {"detail": str(exc), "status": 500})
+            except Exception:
+                logger.exception("assistant_stream_failed event_id=%s question=%r", req.event_id, req.question)
+                failure = _incident_failure(
+                    req.event_id,
+                    "INCIDENT_ASSESSMENT_FAILED",
+                    "The incident assessment could not be completed. Retry; if it continues, share the request ID with an engineer.",
+                )
+                yield sse("error", {
+                    "detail": failure.detail,
+                    "status": 500,
+                    "code": failure.headers.get("X-OpsLens-Error-Code"),
+                    "request_id": failure.headers.get("X-Request-ID"),
+                })
                 return
 
             assembly_ms = result.get("assembly_latency_ms", 0.0)
             yield sse("status", {
-                "stage": "generating",
+                "stage": "analysis_ready",
                 "assembly_latency_ms": assembly_ms,
                 "fallback_used": result.get("fallback_used"),
                 "llm_used": result.get("llm_used"),
                 "cache_hit": result.get("cache_hit", False),
-                "message": f"Context assembled in {assembly_ms:.1f}ms (<2s SLA). Streaming verified guidance..."
+                "timings_ms": result.get("timings_ms") or {},
+                "message": (
+                    "Deterministic analysis ready" if result.get("fallback_used")
+                    else "Grounded explanation ready"
+                ),
             })
 
             answer = (result.get("operator_response") or {}).get("bottom_line") or result.get("answer") or ""
@@ -466,66 +741,157 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
                 yield sse("done", result)
                 return
 
-            # Progressive token-by-token stream with natural operator pacing (~20ms per token)
-            # This ensures operators never stare at a blank screen during active incidents
-            words = answer.split(" ")
-            for idx, word in enumerate(words):
-                prefix = "" if idx == 0 else " "
-                yield sse("token", {"text": prefix + word})
-                await asyncio.sleep(0.02)
+            # Numeric/SOP grounding runs on the complete answer, so never expose
+            # unvalidated model draft tokens. Send the accepted response at once
+            # instead of adding artificial per-word UI delay.
+            yield sse("token", {"text": answer})
 
             yield sse("done", result)
 
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     @router.get("/metrics/impact")
-    async def get_impact_metrics():
-        """Return MTTR and impact metrics for the Schneider Electric hackathon demo."""
+    async def get_impact_metrics(
+        scope: str = Query("session", description="Scope of metrics: 'session' (all recent incidents) or 'selected' (requires event_id)"),
+        event_id: Optional[str] = Query(None, description="Specific event_id for incident-specific metrics"),
+        baseline_mttr: Optional[float] = None,
+    ):
+        """
+        Return MTTR and operational impact metrics calculated from real recorded data.
+
+        - If scope='selected' and event_id is supplied, calculates metrics specific to that single incident.
+        - Otherwise, calculates session-wide metrics across all recorded incidents in the database.
+        - MTTR is computed ONLY from valid resolved incidents with valid, non-negative resolution durations.
+        - When zero valid resolved incidents exist, avg_mttr_minutes and mttr_reduction_pct return None (null).
+        - No hardcoded 18.5 min or 58.9% fallbacks are ever used.
+        """
         import statistics
 
-        recent_ids = orch.db.get_recent_event_ids(50)
+        # Validate baseline
+        valid_baseline = baseline_mttr if (baseline_mttr is not None and baseline_mttr > 0) else None
+
+        # Fetch incident IDs based on scope
+        if scope == "selected" and event_id:
+            all_event_ids = [event_id]
+        else:
+            # Query all distinct event_ids recorded in SQLite candidate_events
+            conn = orch.db._get_connection()
+            cursor = conn.execute("SELECT event_id FROM candidate_events ORDER BY trigger_timestamp DESC")
+            all_event_ids = [row["event_id"] for row in cursor.fetchall()]
+
         resolved_count = 0
         open_count = 0
-        total_incidents = len(recent_ids)
-        resolution_times_minutes = []
+        total_incidents = len(all_event_ids)
+        valid_durations_minutes: List[float] = []
+        resolution_details: List[Dict[str, Any]] = []
 
-        for eid in recent_ids:
+        for eid in all_event_ids:
             ev = orch.get_full_event(eid)
             if not ev:
                 continue
+
             actions = ev.get("actions") or []
             trigger_ts = ev.get("trigger_timestamp")
-            resolve_action = next((a for a in actions if (a.get("action_type") or "").upper() in ("RESOLVE", "RESOLVED")), None)
+            resolve_action = next(
+                (a for a in actions if (a.get("action_type") or "").upper() in ("RESOLVE", "RESOLVED")),
+                None
+            )
+
             if resolve_action and trigger_ts:
                 try:
                     t_start = parse_timestamp(trigger_ts)
                     t_end = parse_timestamp(resolve_action.get("timestamp", trigger_ts))
-                    delta_minutes = (t_end - t_start).total_seconds() / 60.0
-                    if 0 <= delta_minutes <= 480:
-                        resolution_times_minutes.append(delta_minutes)
-                    resolved_count += 1
+                    delta_seconds = (t_end - t_start).total_seconds()
+                    delta_minutes = delta_seconds / 60.0
+
+                    # Only count non-negative, valid durations (<= 480 minutes / 8 hours window)
+                    if 0.0 <= delta_minutes <= 480.0:
+                        valid_durations_minutes.append(round(delta_minutes, 2))
+                        resolved_count += 1
+                        resolution_details.append({
+                            "event_id": eid,
+                            "duration_minutes": round(delta_minutes, 2),
+                            "resolved_at": resolve_action.get("timestamp"),
+                        })
+                    else:
+                        # Invalid/negative duration: excluded from MTTR
+                        resolved_count += 1
                 except Exception:
-                    pass
+                    resolved_count += 1
             elif ev.get("is_open"):
                 open_count += 1
+            elif ev.get("status") in ("RESOLVE", "RESOLVED"):
+                resolved_count += 1
 
-        avg_mttr = round(statistics.mean(resolution_times_minutes), 1) if resolution_times_minutes else 18.5
-        baseline_mttr = 45.0  # Industry baseline MTTR without AI Copilot (minutes)
-        mttr_reduction_pct = round(((baseline_mttr - avg_mttr) / baseline_mttr) * 100, 1)
+        # Calculate MTTR: sum of valid durations / count of valid durations
+        if valid_durations_minutes:
+            avg_mttr = round(sum(valid_durations_minutes) / len(valid_durations_minutes), 1)
+        else:
+            avg_mttr = None
+
+        # Calculate MTTR Reduction: only when both a valid MTTR and valid baseline exist
+        if avg_mttr is not None and valid_baseline is not None and valid_baseline > 0:
+            mttr_reduction_pct = round(((valid_baseline - avg_mttr) / valid_baseline) * 100, 1)
+        else:
+            mttr_reduction_pct = None
+
+        # Context assembly latency statistics from actual recorded measurements
+        if context_assembly_measurements:
+            sorted_latencies = sorted(context_assembly_measurements)
+            n = len(sorted_latencies)
+            p95_idx = min(int(n * 0.95), n - 1)
+            assembly_stats = {
+                "sample_count": n,
+                "avg_ms": round(statistics.mean(sorted_latencies), 1),
+                "median_ms": round(statistics.median(sorted_latencies), 1),
+                "p95_ms": round(sorted_latencies[p95_idx], 1),
+                "min_ms": round(sorted_latencies[0], 1),
+                "max_ms": round(sorted_latencies[-1], 1),
+                "failed_attempts": len(context_assembly_failures),
+                "last_failure_ms": context_assembly_failures[-1]["latency_ms"] if context_assembly_failures else None,
+                "last_failure_reason": context_assembly_failures[-1]["reason"] if context_assembly_failures else None,
+            }
+        else:
+            assembly_stats = {
+                "sample_count": 0,
+                "avg_ms": None,
+                "median_ms": None,
+                "p95_ms": None,
+                "min_ms": None,
+                "max_ms": None,
+                "failed_attempts": len(context_assembly_failures),
+                "last_failure_ms": context_assembly_failures[-1]["latency_ms"] if context_assembly_failures else None,
+                "last_failure_reason": context_assembly_failures[-1]["reason"] if context_assembly_failures else None,
+            }
 
         return {
-            "total_incidents": max(total_incidents, 1),
+            "scope": scope if (scope == "selected" and event_id) else "session",
+            "selected_event_id": event_id if (scope == "selected" and event_id) else None,
+            "total_incidents": total_incidents,
             "resolved_incidents": resolved_count,
             "open_incidents": open_count,
+            "valid_samples_count": len(valid_durations_minutes),
             "avg_mttr_minutes": avg_mttr,
-            "baseline_mttr_minutes": baseline_mttr,
+            "baseline_mttr_minutes": valid_baseline,
             "mttr_reduction_pct": mttr_reduction_pct,
             "context_assembly_target_ms": 2000,
-            "context_assembly_achieved_ms": 45.0,
+            "context_assembly_stats": assembly_stats,
+            "context_assembly_achieved_ms": assembly_stats["avg_ms"],
             "advisory_only": True,
             "human_in_the_loop": True,
             "writes_to_plc": False,
-            "note": "MTTR reduction quantified against standard industrial baseline of 45 minutes."
+            "data_source": "synthetic_demo_events",
+            "mttr_note": (
+                "Calculated strictly from valid resolved incidents in the demo session. "
+                "Returns null when no valid resolution samples exist. Not validated real-world performance data."
+            ),
+            "baseline_note": (
+                "No comparison baseline is configured by default. Supply a validated, comparable baseline explicitly "
+                "before interpreting MTTR reduction; no live plant comparison has been performed."
+            ),
+            "context_assembly_note": (
+                "Target SLA is < 2000 ms. Measured stats reflect actual per-request ContextBuilder runs."
+            ),
         }
 
     @router.post("/actions")
@@ -543,9 +909,8 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
                 alarm_step = next((step for step in reversed(story_steps) if str(step.get("tag", "")).startswith("ALM-")), None)
                 alarm_tag = (alarm_step or {}).get("tag")
                 latest = orch.db.get_latest_reading(alarm_tag) if alarm_tag else None
-                clear_value = latest is not None and (latest.value is False or str(latest.value).strip().lower() in ("false", "0", "clear", "inactive", "off"))
-                later_than_alarm = bool(latest and alarm_step and latest.timestamp > alarm_step.get("timestamp", ""))
-                if not clear_value or not later_than_alarm:
+                equipment_id = orch._equipment_for(alarm_tag) if alarm_tag else None
+                if not _is_clear_alarm_reading(latest, alarm_tag, (alarm_step or {}).get("timestamp"), equipment_id):
                     raise ValueError("Cannot resolve: a later timestamped reading confirming the alarm input is clear has not been observed.")
             action = orch.audit.log_action(
                 event_id=req.event_id,
@@ -557,6 +922,28 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
             return action.model_dump()
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+
+    @router.post("/incidents/{event_id}/unresolved")
+    async def mark_incident_unresolved(event_id: str, req: MarkUnresolvedRequest):
+        """Record a distinct unresolved status transition without changing telemetry."""
+        if orch.get_full_event(event_id) is None:
+            raise HTTPException(status_code=404, detail="Incident not found.")
+        try:
+            action = orch.audit.log_action(
+                event_id=event_id,
+                operator=req.operator.strip(),
+                action_type="MARK_UNRESOLVED",
+                notes=req.reason.strip() if req.reason and req.reason.strip() else None,
+                timestamp=req.timestamp,
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Incident status could not be updated.")
+        return {
+            "event_id": event_id,
+            "status": "UNRESOLVED",
+            "is_open": True,
+            "action": action.model_dump(),
+        }
 
     @router.post("/handover")
     async def compile_handover_post(req: HandoverRequest):
@@ -715,6 +1102,9 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
             unit="status",
             equipment_id=equipment,
             alarm_severity=(full_event.get("candidate") or {}).get("alarm_severity") if full_event else None,
+            data_quality="VALID",
+            data_source="simulated",
+            connection_status="simulation",
         )
 
         orch.db.insert_reading(reading)
@@ -754,19 +1144,39 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
             raise HTTPException(status_code=409, detail="No completed synthetic scenario is awaiting a simulated corrective action.")
         if simulation_state.get("scenario_id") not in ("valve_restriction", "valve_restriction_cascade", "scenario_a"):
             raise HTTPException(status_code=400, detail="A recovery trajectory is only defined for the Pump-02 valve restriction demo.")
+        event_id = simulation_state.get("event_id")
+        full_event = orch.get_full_event(event_id) if event_id else None
+        story_steps = (full_event.get("story") or {}).get("steps") or [] if full_event else []
+        alarm_step = next((step for step in reversed(story_steps) if str(step.get("tag", "")).startswith("ALM-")), None)
+        alarm_tag = (alarm_step or {}).get("tag")
+        alarm_timestamp = (alarm_step or {}).get("timestamp")
+        equipment_id = (full_event.get("candidate") or {}).get("equipment_id") if full_event else None
+        if not equipment_id and alarm_tag:
+            equipment_id = orch._equipment_for(alarm_tag)
+        if not alarm_tag or not alarm_timestamp or not equipment_id:
+            raise HTTPException(status_code=409, detail="The incident's source alarm, timestamp, or equipment could not be verified; recovery cannot confirm clearance.")
+        reading_before_recovery = orch.db.get_latest_reading(alarm_tag)
+        if reading_before_recovery is None:
+            raise HTTPException(status_code=409, detail="No source alarm reading is recorded for this incident.")
         simulation_state["status"] = "recovering"
         try:
             async for reading in simulation_state["generator"].run_valve_restriction_recovery_async(speed_multiplier=10.0):
                 await orch.process_reading(reading)
             if orch._in_flight_tasks:
                 await asyncio.gather(*orch._in_flight_tasks.values(), return_exceptions=True)
-            alarm = orch.db.get_latest_reading("ALM-P02-HP")
-            if alarm is None or alarm.value is not False:
+            alarm = orch.db.get_latest_reading(alarm_tag)
+            if not _is_clear_alarm_reading(
+                alarm,
+                alarm_tag,
+                alarm_timestamp,
+                equipment_id,
+                minimum_timestamp=reading_before_recovery.timestamp,
+            ):
                 simulation_state["status"] = "awaiting_corrective_action"
-                raise HTTPException(status_code=409, detail="The simulated recovery did not produce a clear alarm reading.")
+                raise HTTPException(status_code=409, detail="The simulated recovery did not produce a newer, correctly associated clear reading for this incident.")
             simulation_state["status"] = "alarm_clear_observed"
             simulation_state["timestamp"] = alarm.timestamp
-            return {"status": simulation_state["status"], "event_id": simulation_state.get("event_id"), "alarm_tag": "ALM-P02-HP", "alarm_active": False, "timestamp": alarm.timestamp, "source": "synthetic_simulator"}
+            return {"status": simulation_state["status"], "event_id": event_id, "alarm_tag": alarm_tag, "equipment_id": equipment_id, "alarm_active": False, "timestamp": alarm.timestamp, "source": "synthetic_simulator"}
         except HTTPException:
             raise
         except Exception as exc:
@@ -792,6 +1202,8 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
             conn.execute("DELETE FROM assistant_messages")
             conn.execute("DELETE FROM individual_alarms")
         clear_assistant_cache()
+        context_assembly_measurements.clear()
+        context_assembly_failures.clear()
         try:
             from alarm_lifecycle import get_lifecycle_manager
             get_lifecycle_manager().clear_all()
@@ -910,12 +1322,13 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
     @router.post("/sops/ingest-pdf")
     async def upload_sop_pdf(
         request: Request,
+        background_tasks: BackgroundTasks,
         sop_id: str = Query(..., min_length=1),
         title: str = Query(..., min_length=1),
         equipment: str = Query(""),
         equipment_type: str = Query(""),
         plant_area: str = Query(""),
-        revision: str = Query("1.0"),
+        revision: str = Query("unknown"),
         effective_date: str = Query(""),
         filename: str = Query("sop.pdf"),
     ):
@@ -934,22 +1347,55 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
         }
         try:
             pdf_bytes = await request.body()
-            from pdf_sop_ingestion import ingest_pdf
+            if "respond-async" in request.headers.get("prefer", "").lower():
+                job_id = uuid.uuid4().hex
+                initial = {
+                    "job_id": job_id,
+                    "status": "processing",
+                    "current_stage": "upload_received",
+                    "stages": [{"name": "PDF uploaded", "status": "complete", "complete": True}],
+                    "data": None,
+                    "error": None,
+                }
+                with _sop_ingestion_jobs_lock:
+                    _sop_ingestion_jobs[job_id] = initial
+                background_tasks.add_task(_run_sop_ingestion_job, job_id, pdf_bytes, filename, metadata)
+                return JSONResponse(status_code=202, content={"status": "processing", "job_id": job_id})
+
+            from pdf_sop_ingestion import PdfExtractionError, PdfIndexingError, ingest_pdf
             from sop_retriever import get_qdrant_store
             result = ingest_pdf(pdf_bytes, filename, metadata, get_qdrant_store())
-            return {"status": "indexed", "data": result}
+            return {"status": result.get("status", "indexed"), "data": result}
+        except PdfExtractionError as exc:
+            raise HTTPException(status_code=422, detail={
+                "stage": "extraction_failed",
+                "message": str(exc),
+                "manual_review_required": "scanned" in str(exc).lower() or "ocr" in str(exc).lower(),
+            })
+        except PdfIndexingError as exc:
+            logger.error("SOP PDF indexing request failed code=%s", exc.code)
+            raise HTTPException(status_code=503, detail={"stage": "indexing_failed", "code": exc.code, "message": str(exc)})
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(status_code=400, detail={"stage": "validation_failed", "message": str(exc)})
         except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc))
+            raise HTTPException(status_code=503, detail={"stage": "indexing_failed", "message": str(exc)})
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"SOP ingestion failed: {exc}")
+            logger.exception("SOP PDF ingestion request failed error_type=%s", type(exc).__name__)
+            raise HTTPException(status_code=500, detail={"stage": "ingestion_failed", "message": "SOP ingestion failed before a verified result was recorded. See backend logs for the full diagnostic."})
+
+    @router.get("/sops/ingestion-jobs/{job_id}")
+    async def get_sop_ingestion_job(job_id: str):
+        with _sop_ingestion_jobs_lock:
+            job = _sop_ingestion_jobs.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="SOP ingestion job was not found or has expired after a backend restart.")
+            return dict(job)
 
     @router.get("/sops/{sop_id}/source")
-    async def get_sop_source_pdf(sop_id: str):
+    async def get_sop_source_pdf(sop_id: str, revision: Optional[str] = Query(None), sha256: Optional[str] = Query(None)):
         """Serve the preserved original PDF from local edge storage."""
         from pdf_sop_ingestion import get_pdf_path
-        path = get_pdf_path(sop_id)
+        path = get_pdf_path(sop_id, revision or "", sha256 or "")
         if not path.is_file():
             raise HTTPException(status_code=404, detail=f"No source PDF is stored for SOP '{sop_id}'.")
         return FileResponse(
@@ -959,7 +1405,7 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
         )
 
     @router.get("/sops/{sop_id}")
-    async def get_sop(sop_id: str):
+    async def get_sop(sop_id: str, revision: Optional[str] = Query(None), sha256: Optional[str] = Query(None)):
         """
         Retrieve full SOP content from the configured document/vector store by sop_id.
         Used by the HMI 'View Full Procedure' button.
@@ -969,6 +1415,14 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
         # remains the source for uploaded PDFs and is only needed when the
         # requested document is not bundled.
         doc = _load_sop_document(sop_id)
+        if revision and sha256:
+            try:
+                from sop_retriever import get_qdrant_store
+                selected_pdf = get_qdrant_store().get_document(sop_id, document_id=f"{sop_id}::{revision}::{sha256}")
+                if selected_pdf:
+                    doc = selected_pdf
+            except Exception:
+                pass
         if doc and (doc.get("steps") or doc.get("content_pages")):
             if not doc.get("document_status"):
                 doc["document_status"] = "SOURCE DOCUMENT — approval status not verified"
@@ -1112,20 +1566,29 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
     @router.get("/integration/status")
     async def integration_status():
         """Status of all registered telemetry adapters."""
+        plc = app.state.opcua_adapter.status()
         adapters = [
             {
                 "type": "simulator",
-                "status": "ACTIVE",
+                "status": "RUNNING" if simulation_state.get("status") == "running" else "AVAILABLE",
+                "source_label": "SIMULATED DATA" if simulation_state.get("status") == "running" else "NO SIMULATION RUNNING",
                 "description": "Synthetic telemetry generator for Pump-02 / Compressor-01 scenarios",
                 "write_disabled": True,
             },
             {
                 "type": "opcua",
-                "status": "CONFIGURED_NOT_CONNECTED",
-                "endpoint": "opc.tcp://localhost:4840",
-                "description": "OPC UA CLIENT adapter — read-only, connects to EcoStruxure or other OPC UA servers",
+                "status": plc["state"].upper(),
+                "connected": plc["connected"],
+                "configured": plc["configured"],
+                "source_label": plc["source_label"],
+                "last_read_at": plc["last_read_at"],
+                "mapped_tag_count": plc["mapped_tag_count"],
+                "missing_tags": plc["missing_tags"],
+                "invalid_tags": plc["invalid_tags"],
+                "last_error": plc["last_error"],
+                "description": "OPC UA client — read-only; reports live readings only while the configured PLC session is healthy",
                 "write_disabled": True,
-                "requires": "pip install asyncua + OPCUA_ENDPOINT env var",
+                "requires": None if plc["configured"] else "Set PLC_OPCUA_ENABLED, PLC_OPCUA_ENDPOINT, and an explicit PLC_OPCUA_TAG_MAPPING file",
             },
             {
                 "type": "mqtt",
@@ -1146,6 +1609,9 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
         ]
         return {
             "adapters": adapters,
+            "simulation": {"status": simulation_state.get("status"),
+                "event_id": simulation_state.get("event_id"),
+                "source_label": "SIMULATED DATA" if simulation_state.get("status") == "running" else "NO SIMULATION RUNNING"},
             "safety_note": "ALL adapters are READ-ONLY. OpsLens never writes to industrial equipment.",
             "hmi_agnostic": True,
             "common_model": "TagReading (tag, value, timestamp, unit, equipment_id, quality, source)"

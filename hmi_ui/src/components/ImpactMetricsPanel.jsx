@@ -37,9 +37,8 @@ export default function ImpactMetricsPanel() {
 
       <div className="border-t border-slate-800 p-4 space-y-3">
         <p className="text-[10px] text-amber-500/80 bg-amber-950/20 border border-amber-800/30 rounded px-3 py-1.5 leading-relaxed">
-          These metrics are estimated from synthetic demo events. The {metrics.mttr_reduction_pct ?? '—'}% MTTR
-          reduction figure compares to an assumed {metrics.baseline_mttr_minutes ?? 45}-minute baseline and is
-          not validated real-world performance data.
+          Metrics are calculated from synthetic demo records. MTTR reduction is shown only when a validated
+          comparison baseline is explicitly supplied; these values are not validated plant results.
         </p>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -64,11 +63,15 @@ export default function ImpactMetricsPanel() {
           </div>
 
           <div className="rounded-lg border border-slate-700 bg-slate-800/40 p-3 text-center">
-            <div className="text-xl font-bold text-blue-400">&lt;2s</div>
+            <div className="text-xl font-bold text-blue-400">
+              {metrics.context_assembly_stats?.avg_ms != null ? `${metrics.context_assembly_stats.avg_ms} ms` : '—'}
+            </div>
             <div className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-blue-500 flex items-center justify-center gap-1">
               <Zap size={9} />Context Assembly
             </div>
-            <div className="mt-0.5 text-[10px] text-slate-500">target SLA</div>
+            <div className="mt-0.5 text-[10px] text-slate-500">
+              measured average · {metrics.context_assembly_stats?.sample_count ?? 0} sample(s)
+            </div>
           </div>
 
           <div className="rounded-lg border border-slate-700 bg-slate-800/40 p-3 text-center">

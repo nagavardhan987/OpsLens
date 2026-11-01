@@ -121,6 +121,14 @@ class TestContextBuilder(unittest.TestCase):
         self.assertTrue(any("No relevant timestamped" in item for item in context.missing_data))
         self.assertIsNone(context.selected_event.alarm_state)
 
+    def test_alarm_reading_uses_store_provenance_not_nonexistent_model_source(self):
+        self.add_reading("ALM-P02-HP", True, REFERENCE, unit="bool")
+        context = self.builder.build(EVENT_ID)
+
+        self.assertEqual(context.selected_event.alarm_state["tag"], "ALM-P02-HP")
+        self.assertIs(context.selected_event.alarm_state["value"], True)
+        self.assertEqual(context.selected_event.alarm_state["source"], "sqlite.tag_readings")
+
     def test_unknown_event_and_invalid_reference_timestamp(self):
         with self.assertRaises(ContextEventNotFound):
             self.builder.build("does-not-exist")
@@ -167,9 +175,16 @@ class TestContextBuilder(unittest.TestCase):
 
 class TestContextBuilderAPI(unittest.TestCase):
     class FakeDatabase:
-        def get_context_readings(self, **_kwargs): return []
+        def get_context_readings(self, **_kwargs):
+            return [{
+                "record_id": 1, "tag": "ALM-P02-HP", "value": True,
+                "timestamp": REFERENCE, "unit": "bool", "equipment_id": "Pump-02",
+            }]
         def get_context_events(self, **_kwargs): return []
         def get_context_actions(self, *_args): return []
+        def get_latest_reading(self, tag):
+            return TagReading(tag=tag, value=True, timestamp=REFERENCE,
+                              unit="bool", equipment_id="Pump-02")
         def get_conversation_event_id(self, _conversation_id): return None
         def get_assistant_messages(self, *_args, **_kwargs): return []
         def save_assistant_message(self, *_args, **_kwargs): return None
@@ -183,16 +198,26 @@ class TestContextBuilderAPI(unittest.TestCase):
             return event_record(event_id) if event_id == EVENT_ID else None
 
     def test_context_preview_api_and_assistant_integration(self):
-        client = TestClient(create_app(orchestrator=self.FakeOrchestrator()))
-        response = client.get(f"/api/events/{EVENT_ID}/context")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["window"]["duration_minutes"], 30)
-        self.assertIn("context", client.post("/api/assistant/ask", json={
-            "event_id": EVENT_ID, "question": "Why did this alarm trigger?"
-        }).json())
-        self.assertEqual(client.get("/api/events/missing/context").status_code, 404)
-        invalid = client.get(f"/api/events/{EVENT_ID}/context?reference_timestamp=invalid")
-        self.assertEqual(invalid.status_code, 422)
+        import assistant
+        assistant._llm_complete_override = lambda _prompt: '{"answer":"Deterministic test response"}'
+        try:
+            client = TestClient(create_app(orchestrator=self.FakeOrchestrator()))
+            response = client.get(f"/api/events/{EVENT_ID}/context")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["window"]["duration_minutes"], 30)
+            assistant_response = client.post("/api/assistant/ask", json={
+                "event_id": EVENT_ID, "question": "Why did this alarm trigger?"
+            })
+            self.assertEqual(assistant_response.status_code, 200)
+            self.assertEqual(
+                assistant_response.json()["context"]["selected_event"]["alarm_state"]["source"],
+                "sqlite.tag_readings",
+            )
+            self.assertEqual(client.get("/api/events/missing/context").status_code, 404)
+            invalid = client.get(f"/api/events/{EVENT_ID}/context?reference_timestamp=invalid")
+            self.assertEqual(invalid.status_code, 422)
+        finally:
+            assistant._llm_complete_override = None
 
 
 if __name__ == "__main__":

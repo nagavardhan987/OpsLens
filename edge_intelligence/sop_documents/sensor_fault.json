@@ -1,10 +1,15 @@
 {
   "sop_id": "SOP-GEN-SEN-01",
-  "approved": true,
-  "document_status": "APPROVED PROCEDURE — EcoStruxure Instrumentation Guide",
+  "approved": false,
+  "document_status": "Locally authored demonstration procedure; operational approval status not verified.",
   "title": "Diagnostic Procedure for Isolated Instrument Sensor Faults",
   "equipment_id": "Generic",
-  "tags": ["PIT-02-PRS", "FIT-02-FLW", "CMP-01-VIB", "TNK-01-LVL"],
+  "tags": [
+    "PIT-02-PRS",
+    "FIT-02-FLW",
+    "CMP-01-VIB",
+    "TNK-01-LVL"
+  ],
   "keywords": [
     "sensor fault",
     "transmitter spike",
@@ -24,5 +29,7 @@
     "Perform local field gauge cross-check to verify whether physical process variable is actually deviant.",
     "If local reading matches nominal baseline, place DCS loop in manual mode and flag transmitter for recalibration.",
     "Replace faulty sensor cartridge or signal conditioner and perform zero/span calibration prior to re-enabling alarms."
-  ]
+  ],
+  "approval_status": "unverified",
+  "approval_reference": null
 }

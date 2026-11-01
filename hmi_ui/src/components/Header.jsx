@@ -1,17 +1,15 @@
 import React from 'react';
-import { Activity } from 'lucide-react';
+import { AlertTriangle } from 'lucide-react';
 
-export default function Header() {
+export default function Header({ selectedEventId = null }) {
   return (
     <header className="hmi-header">
-      <div className="hmi-header-main flex items-center justify-center">
-        <a href="#overview" className="hmi-brand flex items-center gap-2.5 text-center" aria-label="OpsLens operator overview">
-          <span className="hmi-brand-mark"><Activity size={18} /></span>
-          <span className="text-left">
-            <strong>OpsLens</strong>
-            <small>Industrial HMI Copilot · EcoStruxure</small>
-          </span>
-        </a>
+      <div className="hmi-header-main alarm-command-header">
+        <div className="alarm-command-title">
+          <span className="alarm-command-mark"><AlertTriangle size={17} /></span>
+          <span><strong>OpsLens</strong></span>
+        </div>
+        <div className="alarm-header-context" aria-live="polite">{selectedEventId || 'Plant operations'}</div>
       </div>
     </header>
   );

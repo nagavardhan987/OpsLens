@@ -65,6 +65,10 @@ class CorrelationEngine:
             dev = ((val - midpoint) / midpoint) * 100.0
             return round(dev, 2)
 
+        if entry.data_type == "string":
+            expected = entry.baseline_status
+            return 0.0 if expected is None or str(reading.value) == expected else 100.0
+
         return 0.0
 
     async def correlate_event(self, candidate: CandidateEvent,
@@ -135,6 +139,8 @@ class CorrelationEngine:
                     is_outside = (val < entry.baseline_min or val > entry.baseline_max)
                     if is_outside and abs(dev) >= self.noise_threshold_pct:
                         is_excursion = True
+                elif entry.data_type == "string" and entry.baseline_status is not None:
+                    is_excursion = str(r.value) != entry.baseline_status
 
                 if is_excursion and onset_timestamp is None:
                     onset_timestamp = r.timestamp
@@ -176,7 +182,15 @@ class CorrelationEngine:
                     deviation_pct=deviation_at_primary,
                     timestamp=onset_timestamp,
                     precedes_primary=precedes,
-                    topology_distance=dist
+                    topology_distance=dist,
+                    value_before=next((prior.value for prior in reversed(readings)
+                                       if self._parse_timestamp(prior.timestamp) < onset_dt), None),
+                    value_after=next((reading.value for reading in readings
+                                      if reading.timestamp == onset_timestamp), None),
+                    unit=closest_reading.unit,
+                    data_source=closest_reading.data_source,
+                    data_quality=closest_reading.data_quality,
+                    connection_status=closest_reading.connection_status,
                 )
             )
 

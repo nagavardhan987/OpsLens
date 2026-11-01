@@ -46,6 +46,11 @@ class VectorSearchResult:
             "title": self.payload.get("title", ""),
             "equipment": self.payload.get("equipment", ""),
             "page": self.payload.get("page", 1),
+            "approval_status": self.payload.get("approval_status", "unverified"),
+            "approved": self.payload.get("approved") is True,
+            "approval_reference": self.payload.get("approval_reference"),
+            "document_status": self.payload.get("document_status", "Approval status not verified"),
+            "sha256": self.payload.get("sha256"),
         }
 
 

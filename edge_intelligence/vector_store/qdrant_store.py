@@ -11,6 +11,7 @@ They are NOT probabilities, NOT confidence percentages.
 import os
 import uuid
 import logging
+from urllib.parse import urlsplit
 from typing import List, Dict, Any, Optional
 
 from .base import VectorStore, VectorStoreDocument, VectorSearchResult
@@ -21,6 +22,20 @@ COLLECTION_NAME = os.environ.get("QDRANT_COLLECTION", "opslens_sops")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 QDRANT_PATH = os.environ.get("QDRANT_PATH", "./qdrant_data")
 VECTOR_SIZE = 384   # all-MiniLM-L6-v2 output dimension
+
+
+def validate_collection_vectors(vectors: Any, collection: str = COLLECTION_NAME) -> None:
+    """Reject an incompatible existing schema without mutating its data."""
+    if isinstance(vectors, dict):
+        raise RuntimeError(
+            f"Collection '{collection}' uses named vectors; OpsLens requires one unnamed {VECTOR_SIZE}-dimension cosine vector."
+        )
+    size = getattr(vectors, "size", None)
+    distance = str(getattr(vectors, "distance", "")).split(".")[-1].casefold()
+    if size != VECTOR_SIZE or distance != "cosine":
+        raise RuntimeError(
+            f"Collection '{collection}' vector configuration mismatch: found size={size}, distance={distance or 'unknown'}; expected size={VECTOR_SIZE}, distance=cosine. Existing data was not changed."
+        )
 
 
 class QdrantVectorStore(VectorStore):
@@ -35,7 +50,13 @@ class QdrantVectorStore(VectorStore):
         self.collection = collection
         self._url = url if url is not None else QDRANT_URL
         self._client = None
+        self._initialization_error = None
         self._init_client()
+
+    @property
+    def initialization_error(self):
+        """Sanitized diagnostic retained when Qdrant initialization fails."""
+        return self._initialization_error
 
     def _init_client(self):
         try:
@@ -46,12 +67,16 @@ class QdrantVectorStore(VectorStore):
                 logger.info(f"[Qdrant] Opening embedded local storage at {QDRANT_PATH}")
                 self._client = QdrantClient(path=QDRANT_PATH)
             elif self._url:
-                logger.info(f"[Qdrant] Connecting to remote Qdrant at {self._url}")
+                parts = urlsplit(self._url)
+                safe_endpoint = f"{parts.scheme}://{parts.hostname or 'configured-host'}:{parts.port or (443 if parts.scheme == 'https' else 6333)}"
+                logger.info("[Qdrant] Connecting to remote Qdrant at %s", safe_endpoint)
                 self._client = QdrantClient(url=self._url)
             else:
                 raise RuntimeError("Set QDRANT_URL to a local Qdrant URL or 'embedded'.")
 
-            # Create collection if it does not exist
+            # Create collection if it does not exist. Existing collections are
+            # inspected, never dropped/recreated, and must match the configured
+            # embedding dimension and cosine metric before writes are allowed.
             existing = [c.name for c in self._client.get_collections().collections]
             if self.collection not in existing:
                 self._client.create_collection(
@@ -61,6 +86,8 @@ class QdrantVectorStore(VectorStore):
                 logger.info(f"[Qdrant] Created collection '{self.collection}'")
             else:
                 logger.info(f"[Qdrant] Collection '{self.collection}' already exists")
+                info = self._client.get_collection(self.collection)
+                validate_collection_vectors(info.config.params.vectors, self.collection)
 
             for field in ("sop_id", "document_id", "equipment", "equipment_type", "plant_area"):
                 try:
@@ -71,15 +98,19 @@ class QdrantVectorStore(VectorStore):
                     pass
 
         except ImportError:
-            logger.error("[Qdrant] qdrant-client not installed. Run: pip install qdrant-client")
+            self._initialization_error = "qdrant_client_missing"
+            logger.exception("[Qdrant] qdrant-client dependency is unavailable")
             self._client = None
         except Exception as e:
-            logger.error(f"[Qdrant] Init failed: {e}")
+            self._initialization_error = f"{type(e).__name__}: {e}"
+            logger.exception("[Qdrant] Initialization failed for collection=%s", self.collection)
             self._client = None
 
     def _ensure_client(self):
         if self._client is None:
-            raise RuntimeError("Qdrant client not available. Check logs for details.")
+            if self._initialization_error:
+                raise RuntimeError(f"Qdrant client not available: {self._initialization_error}")
+            raise RuntimeError("Qdrant client not available; initialization has not completed.")
 
     def add_documents(self, documents: List[VectorStoreDocument]) -> int:
         return self.upsert(documents)
@@ -90,6 +121,16 @@ class QdrantVectorStore(VectorStore):
 
         points = []
         for doc in documents:
+            if len(doc.embedding) != VECTOR_SIZE:
+                raise ValueError(f"Vector dimension mismatch for chunk {doc.chunk_id}: got {len(doc.embedding)}, expected {VECTOR_SIZE}.")
+            if not doc.text or not doc.sop_id or not doc.document_id:
+                raise ValueError(f"Invalid SOP chunk metadata for chunk {doc.chunk_id}: text, SOP ID, and document ID are required.")
+            try:
+                import math
+                if not all(math.isfinite(float(value)) for value in doc.embedding):
+                    raise ValueError(f"Non-finite vector value in SOP chunk {doc.chunk_id}.")
+            except (TypeError, OverflowError) as exc:
+                raise ValueError(f"Invalid vector values in SOP chunk {doc.chunk_id}.") from exc
             payload = dict(doc.payload)
             payload["chunk_id"] = doc.chunk_id
             payload["document_id"] = doc.document_id
@@ -179,18 +220,21 @@ class QdrantVectorStore(VectorStore):
             ))
         return results
 
-    def get_document(self, sop_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve all chunks for a given sop_id and reconstruct the SOP."""
+    def get_document(self, sop_id: str, document_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Retrieve a SOP or one exact indexed document revision."""
         self._ensure_client()
         from qdrant_client.models import Filter, FieldCondition, MatchValue
 
         points = []
         offset = None
+        conditions = [FieldCondition(key="sop_id", match=MatchValue(value=sop_id))]
+        if document_id:
+            conditions.append(FieldCondition(key="document_id", match=MatchValue(value=document_id)))
         while True:
             batch, next_offset = self._client.scroll(
                 collection_name=self.collection,
                 scroll_filter=Filter(
-                    must=[FieldCondition(key="sop_id", match=MatchValue(value=sop_id))]
+                    must=conditions
                 ),
                 limit=200,
                 offset=offset,
@@ -219,6 +263,9 @@ class QdrantVectorStore(VectorStore):
             "effective_date": first.get("effective_date", ""),
             "source": first.get("source", "OpsLens SOP Knowledge Base"),
             "document_status": first.get("document_status"),
+            "approval_status": first.get("approval_status", "unverified"),
+            "approved": first.get("approved") is True,
+            "approval_reference": first.get("approval_reference"),
             "source_pdf": first.get("source_pdf"),
             "page_count": first.get("page_count"),
             "keywords": first.get("keywords", []),

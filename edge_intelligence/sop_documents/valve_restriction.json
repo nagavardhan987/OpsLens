@@ -1,10 +1,16 @@
 {
   "sop_id": "SOP-P02-VLV-01",
-  "approved": true,
-  "document_status": "APPROVED PROCEDURE — EcoStruxure Asset Advisor Verified",
+  "approved": false,
+  "document_status": "Locally authored demonstration procedure; operational approval status not verified.",
   "title": "Pump-02 Throttling Valve Restriction Remediation",
   "equipment_id": "Pump-02",
-  "tags": ["VLV-04-POS", "FIT-02-FLW", "MOT-02-CUR", "PIT-02-PRS", "ALM-P02-HP"],
+  "tags": [
+    "VLV-04-POS",
+    "FIT-02-FLW",
+    "MOT-02-CUR",
+    "PIT-02-PRS",
+    "ALM-P02-HP"
+  ],
   "keywords": [
     "valve restriction",
     "flow reduction",
@@ -27,5 +33,7 @@
     "Monitor discharge flow transmitter FIT-02-FLW to verify volumetric recovery above 75 L/min.",
     "Verify motor current MOT-02-CUR subsides below 8.2 A nominal threshold.",
     "Once discharge line pressure PIT-02-PRS stabilizes below 5.2 bar, reset ALM-P02-HP and restore cascade control."
-  ]
+  ],
+  "approval_status": "unverified",
+  "approval_reference": null
 }

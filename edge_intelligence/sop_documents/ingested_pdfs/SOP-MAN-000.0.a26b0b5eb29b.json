@@ -1,0 +1,113 @@
+{
+  "sop_id": "SOP-MAN-000",
+  "title": "Standard Operating Procedures Manual — Wastewater Treatment Plant: Liquid, Sludge and Biogas Systems",
+  "equipment": "All wastewater process areas",
+  "equipment_type": "Wastewater Treatment",
+  "plant_area": "All plant process areas",
+  "applicable_equipment_ids": [
+    "LiftStation-01",
+    "InletWorks-01",
+    "AerationBasin-01",
+    "TertiaryTreatment-01"
+  ],
+  "revision": "0",
+  "revision_label": "0 (Draft for review)",
+  "effective_date": "",
+  "approval_status": "draft",
+  "approved": false,
+  "approval_reference": null,
+  "approval_table_completed": false,
+  "document_status": "Revision 0 — Draft for review. Approval table is incomplete. REFERENCE ONLY — NOT APPROVED. Numerical values are typical examples and require verification against the actual plant design, equipment data, discharge permit, and applicable regulations.",
+  "source_pdf": "SOP Manual – Wastewater Treatment Plant.pdf",
+  "document_id": "SOP-MAN-000::0::a26b0b5eb29bdd1f7bdfcaae3de798ab5157262a0a49090bf9d1bd48a417bb22",
+  "manual_review_required": true,
+  "extraction_warnings": [],
+  "extraction_status": "complete",
+  "source": "local_pdf",
+  "page_count": 29,
+  "chunk_count": 45,
+  "indexed_at": "2026-11-01T14:04:22.845822+00:00",
+  "sha256": "a26b0b5eb29bdd1f7bdfcaae3de798ab5157262a0a49090bf9d1bd48a417bb22",
+  "sop_register": [
+    {
+      "sop_id": "SOP-GEN-001",
+      "title": "Lockout / Tagout",
+      "process_area": "All areas",
+      "risk_level": "High"
+    },
+    {
+      "sop_id": "SOP-GEN-002",
+      "title": "Confined Space Entry",
+      "process_area": "Wet well, tanks, digester",
+      "risk_level": "High"
+    },
+    {
+      "sop_id": "SOP-GEN-003",
+      "title": "Alarm Response and Shift Handover",
+      "process_area": "Control room",
+      "risk_level": "Medium"
+    },
+    {
+      "sop_id": "SOP-GEN-004",
+      "title": "Incident Reporting and Regulatory Notification",
+      "process_area": "All areas",
+      "risk_level": "Medium"
+    },
+    {
+      "sop_id": "SOP-GEN-005",
+      "title": "Permit to Work and Hot Work Control",
+      "process_area": "All areas, gas area",
+      "risk_level": "High"
+    },
+    {
+      "sop_id": "SOP-INL-001",
+      "title": "Bar Screen Operation and Blockage Response",
+      "process_area": "Inlet works",
+      "risk_level": "Medium"
+    },
+    {
+      "sop_id": "SOP-LFT-001",
+      "title": "Lift Station High-High Level and Pump Clog Response",
+      "process_area": "Lift station",
+      "risk_level": "High"
+    },
+    {
+      "sop_id": "SOP-BIO-001",
+      "title": "Activated Sludge Foam Control",
+      "process_area": "Aeration tanks",
+      "risk_level": "Medium"
+    },
+    {
+      "sop_id": "SOP-BIO-002",
+      "title": "RAS Pump Failure and Sludge Blanket Control",
+      "process_area": "Secondary clarifiers, RAS",
+      "risk_level": "High"
+    },
+    {
+      "sop_id": "SOP-GAS-001",
+      "title": "Biogas Holder High Pressure, CHP Trip and Flare Operation",
+      "process_area": "Gas line",
+      "risk_level": "High"
+    },
+    {
+      "sop_id": "SOP-SLD-001",
+      "title": "Dewatering Centrifuge Operation and Centrate Recycle Control",
+      "process_area": "Sludge line",
+      "risk_level": "Medium"
+    },
+    {
+      "sop_id": "SOP-LAB-001",
+      "title": "Process Sampling and Monitoring Schedule",
+      "process_area": "Laboratory",
+      "risk_level": "Low"
+    }
+  ],
+  "documentation_gaps_for_scenario_7": [
+    "SOP-TER-001",
+    "SOP-DIS-001",
+    "SOP-DIS-002",
+    "SOP-CHM-001",
+    "SOP-EFF-001",
+    "SOP-LAB-002"
+  ]
+}

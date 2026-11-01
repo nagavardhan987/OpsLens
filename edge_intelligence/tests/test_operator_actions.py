@@ -75,6 +75,50 @@ class TestOperatorActionsUnit(unittest.TestCase):
         self.audit.log_action(event_1, "alice", "ACKNOWLEDGE")
         self.assertEqual(self.audit.get_open_events(), [event_2])
 
+    def test_log_event_uses_annotate_and_persists_operator_time_incident_and_note(self):
+        event_id = str(uuid.uuid4())
+        self.db.save_event_story(EventStory(event_id=event_id, steps=[], causal_label="Test incident"))
+        action = self.audit.log_action(
+            event_id=event_id, operator="operator-7", action_type="ANNOTATE",
+            notes="Observed a repeated local indication.", timestamp="2026-10-31T12:00:00Z",
+        )
+        stored = self.audit.get_actions_for_event(event_id)[0]
+        self.assertEqual(stored.action_type, "ANNOTATE")
+        self.assertEqual(stored.operator, "operator-7")
+        self.assertEqual(stored.timestamp, "2026-10-31T12:00:00Z")
+        self.assertEqual(stored.event_id, event_id)
+        self.assertEqual(stored.notes, "Observed a repeated local indication.")
+        self.assertEqual(action.action_id, stored.action_id)
+        self.assertEqual(self.db.get_event_status(event_id), "OPEN")
+
+    def test_verify_and_inspect_are_independent_audit_actions(self):
+        event_id = str(uuid.uuid4())
+        self.db.save_event_story(EventStory(event_id=event_id, steps=[], causal_label="Test incident"))
+        self.audit.log_action(event_id, "operator-7", "VERIFY", "Verified display only.")
+        self.audit.log_action(event_id, "operator-7", "INSPECT", "Inspection acknowledged.")
+        self.assertEqual([a.action_type for a in self.audit.get_actions_for_event(event_id)], ["VERIFY", "INSPECT"])
+        self.assertEqual(self.db.get_event_status(event_id), "OPEN")
+        self.assertIn(event_id, self.audit.get_open_events())
+
+    def test_mark_unresolved_sets_latest_status_and_keeps_incident_open(self):
+        event_id = str(uuid.uuid4())
+        self.db.save_event_story(EventStory(event_id=event_id, steps=[], causal_label="Test incident"))
+        self.audit.log_action(event_id, "operator-7", "MARK_UNRESOLVED", "Awaiting maintenance review.")
+        self.assertEqual(self.db.get_event_status(event_id), "UNRESOLVED")
+        self.assertFalse(self.db.is_event_resolved(event_id))
+        self.assertIn(event_id, self.audit.get_open_events())
+        self.assertEqual(self.audit.get_actions_for_event(event_id)[0].notes, "Awaiting maintenance review.")
+
+    def test_latest_resolution_requires_new_unresolved_transition_to_reopen(self):
+        event_id = str(uuid.uuid4())
+        self.db.save_event_story(EventStory(event_id=event_id, steps=[], causal_label="Test incident"))
+        self.audit.log_action(event_id, "operator-7", "RESOLVE", "Operator confirmed clear.", "2026-10-31T12:00:00Z")
+        self.assertEqual(self.db.get_event_status(event_id), "RESOLVED")
+        self.assertNotIn(event_id, self.audit.get_open_events())
+        self.audit.log_action(event_id, "operator-7", "MARK_UNRESOLVED", "Alarm recurred.", "2026-10-31T12:01:00Z")
+        self.assertEqual(self.db.get_event_status(event_id), "UNRESOLVED")
+        self.assertIn(event_id, self.audit.get_open_events())
+
 
 if __name__ == "__main__":
     unittest.main()

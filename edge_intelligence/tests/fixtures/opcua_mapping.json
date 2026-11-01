@@ -1,0 +1,7 @@
+{
+  "MOT-02-CUR": {
+    "node_id": "ns=4;s=Drive.Current",
+    "equipment_id": "Pump-02",
+    "unit": "A"
+  }
+}

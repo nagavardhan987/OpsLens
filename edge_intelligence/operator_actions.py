@@ -36,6 +36,7 @@ ALLOWED_ACTION_TYPES: Set[str] = {
     "INVESTIGATE",
     "INVESTIGATING",
     "ANNOTATE",
+    "MARK_UNRESOLVED",
 }
 
 

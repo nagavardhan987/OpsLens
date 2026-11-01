@@ -1,9 +1,16 @@
 {
   "sop_id": "SOP-C01-SPD-01",
-  "document_status": "APPROVED PROCEDURE — EcoStruxure Machine Expert Verified",
+  "approved": false,
+  "document_status": "Locally authored demonstration procedure; operational approval status not verified.",
   "title": "Compressor-01 Overspeed & Vibration Runaway Response",
   "equipment_id": "Compressor-01",
-  "tags": ["CMP-01-SPD", "CMP-01-VIB", "CMP-01-CUR", "CMP-01-TMP", "ALM-C01-VB"],
+  "tags": [
+    "CMP-01-SPD",
+    "CMP-01-VIB",
+    "CMP-01-CUR",
+    "CMP-01-TMP",
+    "ALM-C01-VB"
+  ],
   "keywords": [
     "overspeed",
     "speed runaway",
@@ -27,5 +34,7 @@
     "Monitor drive-end vibration CMP-01-VIB and bearing temperature CMP-01-TMP during coast-down.",
     "Engage auxiliary lube oil system to prevent bearing seizure during emergency deceleration.",
     "Lock out compressor drive motor and inspect rotor balance and coupling alignment before restart."
-  ]
+  ],
+  "approval_status": "unverified",
+  "approval_reference": null
 }

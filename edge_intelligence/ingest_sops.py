@@ -30,6 +30,7 @@ def chunk_sop(sop: Dict[str, Any]) -> List[Dict[str, Any]]:
     Each chunk gets: sop_id, title, equipment, section, page, text.
     """
     sop_id = sop.get("sop_id", "UNKNOWN")
+    document_id = sop.get("document_id") or sop_id
     title = sop.get("title", "")
     equipment = sop.get("equipment_id", "")
     keywords = sop.get("keywords", [])
@@ -38,7 +39,7 @@ def chunk_sop(sop: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     chunks = []
     base_payload = {
-        "document_id": sop_id,
+        "document_id": document_id,
         "document_name": sop.get("document_name", title),
         "sop_id": sop_id,
         "title": title,
@@ -49,6 +50,11 @@ def chunk_sop(sop: Dict[str, Any]) -> List[Dict[str, Any]]:
         "effective_date": sop.get("effective_date", ""),
         "source": "OpsLens SOP Knowledge Base",
         "document_status": sop.get("document_status", "SOURCE DOCUMENT — approval status not verified"),
+        "approval_status": sop.get("approval_status", "unverified"),
+        "approval_reference": sop.get("approval_reference"),
+        "approved": sop.get("approved") is True,
+        "source_pdf": sop.get("source_pdf"),
+        "manual_review_required": bool(sop.get("manual_review_required", False)),
         "keywords": keywords,
         "reference_limits": ref_limits,
         "tags": sop.get("tags", []),
@@ -64,7 +70,7 @@ def chunk_sop(sop: Dict[str, Any]) -> List[Dict[str, Any]]:
     )
     chunks.append({
         **base_payload,
-        "chunk_id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{sop_id}::header")),
+        "chunk_id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{document_id}::header")),
         "section": "header",
         "page": 1,
         "text": header_text,
@@ -75,7 +81,7 @@ def chunk_sop(sop: Dict[str, Any]) -> List[Dict[str, Any]]:
         step_text = f"Step {idx}: {step}"
         chunks.append({
             **base_payload,
-            "chunk_id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{sop_id}::step::{idx}")),
+            "chunk_id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{document_id}::step::{idx}")),
             "section": "step",
             "page": idx,
             "text": step_text,
@@ -90,7 +96,7 @@ def chunk_sop(sop: Dict[str, Any]) -> List[Dict[str, Any]]:
         )
         chunks.append({
             **base_payload,
-            "chunk_id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{sop_id}::all_steps")),
+            "chunk_id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{document_id}::all_steps")),
             "section": "procedure",
             "page": 0,
             "text": all_steps_text,
@@ -133,7 +139,7 @@ def ingest(vector_store=None):
         for chunk, emb in zip(chunks, embeddings):
             all_docs.append(VectorStoreDocument(
                 chunk_id=chunk["chunk_id"],
-                document_id=chunk["sop_id"],
+                document_id=chunk["document_id"],
                 sop_id=chunk["sop_id"],
                 text=chunk["text"],
                 embedding=emb.tolist(),
