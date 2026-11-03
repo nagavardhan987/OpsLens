@@ -20,6 +20,10 @@ export function getWorkflowSubmission(actionType, notes = '') {
 
 /** Human-safe operator feedback; backend validation text is deliberately ignored. */
 export function workflowActionFailureMessage(actionType, error) {
+  if (actionType === 'ACKNOWLEDGE' || actionType === 'ACKNOWLEDGED') {
+    if (error?.status === 404) return 'The selected alarm is no longer available. Refresh the alarm list and try again.';
+    return 'The alarm acknowledgement was not saved. The alarm state is unchanged; try again.';
+  }
   if (actionType === 'RESOLVE' && error?.status === 400) {
     return 'Resolution is still locked. A later source-clear reading and operator confirmation are required.';
   }
@@ -32,6 +36,7 @@ export function workflowActionFailureMessage(actionType, error) {
 }
 
 export function workflowActionSuccessMessage(actionType) {
+  if (actionType === 'ACKNOWLEDGE' || actionType === 'ACKNOWLEDGED') return 'Alarm acknowledged in OpsLens. The alarm remains active until the source condition clears.';
   if (actionType === 'LOG_EVENT') return 'Event note saved to the incident audit history.';
   if (actionType === 'MARK_UNRESOLVED') return 'Incident marked unresolved and returned to the active alarm list.';
   if (actionType === 'VERIFY' || actionType === 'VERIFIED') return 'Operator verification recorded. Alarm state is unchanged.';

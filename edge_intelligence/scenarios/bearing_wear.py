@@ -59,6 +59,7 @@ class BearingWearScenario(BaseScenario):
         """
         overrides: Dict[str, Any] = {}
         t = elapsed_seconds
+        overrides["CMP-01-RUN"] = True
 
         # 1. Bearing Vibration: nominal (~2.0 mm/s) -> 7.8 mm/s
         if t < 15.0:

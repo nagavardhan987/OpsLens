@@ -1,70 +1,16 @@
 import React from 'react';
-import { ClipboardList, UserCheck, FileSpreadsheet } from 'lucide-react';
+import { ClipboardList, FileSpreadsheet, UserCheck } from 'lucide-react';
 
-export default function ShiftHandoverCard({ handover, onOpenModal, isIncident = false, unitName = 'Pump-02', fullEvent = null }) {
-  const eventsInWindow  = handover?.events || handover?.events_in_window || [];
-  const actionsInWindow = handover?.actions || handover?.actions_in_window || [];
-  const openIssues      = handover?.open_events || handover?.open_issues || [];
-  const latestEvent     = eventsInWindow.length > 0
-    ? (typeof eventsInWindow[eventsInWindow.length - 1] === 'object' ? eventsInWindow[eventsInWindow.length - 1] : { primary_tag: eventsInWindow[eventsInWindow.length - 1] })
-    : null;
-  const contributor = fullEvent?.evidence?.likely_contributor_tag
-    || latestEvent?.likely_contributor
-    || handover?.likely_contributor
-    || (isIncident ? 'Under Investigation' : '—');
-
-  const eventCount = Math.max(eventsInWindow.length, isIncident ? 1 : 0);
-  const issueCount = Math.max(openIssues.length, isIncident ? 1 : 0);
-
-  const rows = [
-    { label: 'Events logged',    value: eventCount > 0 ? `${eventCount} event(s)` : 'None', highlight: eventCount > 0 },
-    { label: 'Open issues',      value: issueCount > 0 ? `${issueCount} active` : 'None',   highlight: issueCount > 0 },
-    { label: 'Possible contributor', value: contributor,                                     amber: true },
-    { label: 'Operator actions', value: actionsInWindow.length > 0 ? `${actionsInWindow.length} recorded` : 'None', highlight: false },
-    { label: 'Status',           value: issueCount > 0 || isIncident ? 'Active' : 'Normal', highlight: issueCount > 0 || isIncident },
-  ];
-
-  const operator = handover?.operator || (actionsInWindow.length > 0 ? actionsInWindow[actionsInWindow.length - 1].operator_id : 'J. Rivera (Shift 2)');
-
-  return (
-    <div className="rounded-xl border border-[#D8E2DA] bg-white p-5 shadow-sm">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-[#E8F5EC] border border-[#009530]/30 flex items-center justify-center">
-            <ClipboardList className="w-3.5 h-3.5 text-[#009530]" />
-          </div>
-          <div>
-            <div className="text-[10px] font-mono uppercase tracking-widest text-[#009530] font-bold">Shift Handover</div>
-            <div className="text-sm font-bold text-[#26352C]">{unitName}</div>
-          </div>
-        </div>
-        <button
-          onClick={onOpenModal}
-          className="h-7 px-3 rounded-lg text-[11px] font-medium flex items-center gap-1.5 bg-[#F3F6F3] hover:bg-[#E8F5EC] text-[#26352C] border border-[#D8E2DA] cursor-pointer transition-all"
-        >
-          <FileSpreadsheet className="w-3 h-3 text-[#009530]" />
-          View handover
-        </button>
-      </div>
-
-      {/* Rows */}
-      <div className="space-y-2">
-        {rows.map((row, i) => (
-          <div key={i} className="flex items-center justify-between text-xs">
-            <span className="text-[#64736A] font-mono">{row.label}</span>
-            <span className={`font-semibold ${
-              row.amber ? 'text-[#B7791F]' : row.highlight ? 'text-[#D92D20]' : 'text-[#26352C]'
-            }`}>{row.value}</span>
-          </div>
-        ))}
-      </div>
-
-      {/* Footer */}
-      <div className="mt-4 pt-3 border-t border-[#D8E2DA] flex items-center gap-1.5 text-[11px] text-[#64736A]">
-        <UserCheck className="w-3 h-3 text-[#009530]" />
-        <span>{operator}</span>
-      </div>
-    </div>
-  );
+export default function ShiftHandoverCard({ handover, onOpenModal, onOpenPage }) {
+  const latest = handover?.latest_handover;
+  const openAlarms = handover?.open_alarms || [];
+  const unresolved = handover?.unresolved_incidents || [];
+  const actions = handover?.outstanding_operator_actions?.items || [];
+  const pendingValue = handover?.outstanding_operator_actions?.status === 'Unavailable' ? 'Not tracked' : actions.length;
+  const status = latest?.status === 'RECEIVED' ? 'Received by incoming operator' : latest ? 'Awaiting incoming confirmation' : 'No submitted handover recorded';
+  return <section className="shift-handover-overview" aria-label="Shift handover summary">
+    <div className="shift-handover-overview-heading"><div><span className="operator-eyebrow"><ClipboardList size={13} /> Shift Handover</span><strong>{handover?.current_shift ? `${handover.current_shift.name} shift · ${handover.current_shift.date}` : 'Current shift unavailable'}</strong><small>{status}</small></div><div className="shift-handover-overview-actions"><button type="button" onClick={onOpenPage}>Open handover</button><button type="button" onClick={onOpenModal}><FileSpreadsheet size={13} /> Review / submit</button></div></div>
+    <div className="shift-handover-overview-stats"><span><b>{openAlarms.length}</b> open alarms</span><span><b>{unresolved.length}</b> unresolved incidents</span><span><b>{pendingValue}</b> pending actions</span></div>
+    <p className="shift-handover-overview-footer"><UserCheck size={13} /> Outgoing: {latest?.outgoing_operator || 'Not recorded'} · Incoming: {latest?.incoming_operator || 'Not confirmed'} · Carry forward remains open until separately resolved.</p>
+  </section>;
 }

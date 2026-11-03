@@ -374,6 +374,12 @@ class DeduplicationEngine:
         # Non-destructive individual alarm preservation
         try:
             self.db.save_individual_alarm(cluster.event_id, alarm_rec)
+            self.db.record_alarm_occurrence(
+                cluster.event_id,
+                alarm_rec,
+                data_source=getattr(reading, "data_source", "unknown"),
+                data_quality=getattr(reading, "data_quality", "UNKNOWN"),
+            )
         except Exception:
             pass
 

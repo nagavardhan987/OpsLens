@@ -11,15 +11,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from models import EventStory, OperatorAction
+from models import EventStory, IndividualAlarmRecord, OperatorAction
 from database import Database
 from operator_actions import OperatorActionAudit, log_action, get_actions_for_event, get_open_events, ALLOWED_ACTION_TYPES
+from operational_history import build_handover_summary
 
 
 class TestOperatorActionsUnit(unittest.TestCase):
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
+        test_root = Path(__file__).resolve().parents[1] / ".test-tmp"
+        test_root.mkdir(exist_ok=True)
+        self.temp_dir = tempfile.mkdtemp(dir=test_root)
         self.db_path = Path(self.temp_dir) / "test_audit_unit.db"
         self.db = Database(db_path=self.db_path)
         self.audit = OperatorActionAudit(db=self.db)
@@ -65,7 +68,7 @@ class TestOperatorActionsUnit(unittest.TestCase):
             self.audit.log_action(str(uuid.uuid4()), "alice", "ACKNOWLEDGE")
 
     def test_open_events_query(self):
-        """Verify get_open_events returns only unhandled events."""
+        """Acknowledgement records operator awareness without closing an incident."""
         event_1 = str(uuid.uuid4())
         event_2 = str(uuid.uuid4())
         self.db.save_event_story(EventStory(event_id=event_1, steps=[], causal_label="E1"))
@@ -73,6 +76,8 @@ class TestOperatorActionsUnit(unittest.TestCase):
 
         self.assertEqual(len(self.audit.get_open_events()), 2)
         self.audit.log_action(event_1, "alice", "ACKNOWLEDGE")
+        self.assertEqual(set(self.audit.get_open_events()), {event_1, event_2})
+        self.audit.log_action(event_1, "alice", "RESOLVE")
         self.assertEqual(self.audit.get_open_events(), [event_2])
 
     def test_log_event_uses_annotate_and_persists_operator_time_incident_and_note(self):
@@ -108,6 +113,46 @@ class TestOperatorActionsUnit(unittest.TestCase):
         self.assertFalse(self.db.is_event_resolved(event_id))
         self.assertIn(event_id, self.audit.get_open_events())
         self.assertEqual(self.audit.get_actions_for_event(event_id)[0].notes, "Awaiting maintenance review.")
+
+    def test_alarm_acknowledgement_is_persistent_active_and_idempotent(self):
+        event_id = str(uuid.uuid4())
+        alarm_id = str(uuid.uuid4())
+        self.db.save_event_story(EventStory(event_id=event_id, steps=[], causal_label="Active alarm"))
+        alarm = IndividualAlarmRecord(
+            alarm_id=alarm_id, source_event_id=event_id, tag="ALM-P02-HP", equipment_id="Pump-02",
+            value=True, first_seen_timestamp="2026-11-03T10:00:00Z", last_seen_timestamp="2026-11-03T10:00:00Z",
+        )
+        self.db.save_individual_alarm(event_id, alarm)
+
+        action, created = self.db.record_alarm_acknowledgement(
+            event_id, alarm_id, "operator-7", "OpsLens acknowledgement.", "2026-11-03T10:05:00Z",
+        )
+        self.assertTrue(created)
+        self.assertEqual(action.action_type, "ACKNOWLEDGE")
+        saved_alarm = self.db.get_individual_alarms(event_id)[0]
+        self.assertEqual(saved_alarm["lifecycle_state"], "ACKNOWLEDGED")
+        self.assertEqual(saved_alarm["acknowledged_timestamp"], "2026-11-03T10:05:00Z")
+        self.assertEqual(self.db.get_alarm_transitions(alarm_id)[-1]["state"], "ACKNOWLEDGED")
+        self.assertEqual(self.db.get_event_status(event_id), "ACKNOWLEDGED")
+        self.assertIn(event_id, self.audit.get_open_events())
+        handover = build_handover_summary(self.db, "2026-11-03T10:00:00Z", "2026-11-03T11:00:00Z")
+        self.assertEqual(handover["unacknowledged_alarms"], [])
+        self.assertEqual(handover["open_alarms"][0]["status"], "ACKNOWLEDGED")
+        self.assertEqual(handover["alarms_acknowledged_in_shift"][0]["alarm_id"], "ALM-P02-HP")
+
+        repeated, created_again = self.db.record_alarm_acknowledgement(
+            event_id, alarm_id, "operator-7", "Duplicate click.", "2026-11-03T10:06:00Z",
+        )
+        self.assertFalse(created_again)
+        self.assertEqual(repeated.action_id, action.action_id)
+        self.assertEqual(len(self.db.get_operator_actions(event_id)), 1)
+        self.assertEqual(len(self.db.get_alarm_transitions(alarm_id)), 1)
+
+        # A repeated active telemetry sample must not erase the recorded acknowledgement.
+        alarm.last_seen_timestamp = "2026-11-03T10:07:00Z"
+        alarm.repeat_count = 2
+        self.db.save_individual_alarm(event_id, alarm)
+        self.assertEqual(self.db.get_individual_alarms(event_id)[0]["lifecycle_state"], "ACKNOWLEDGED")
 
     def test_latest_resolution_requires_new_unresolved_transition_to_reopen(self):
         event_id = str(uuid.uuid4())

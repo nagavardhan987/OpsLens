@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Play, RotateCcw, Zap, ShieldCheck, AlertTriangle, RefreshCw } from 'lucide-react';
+import { resolvePrimaryScenarioCatalog } from '../lib/scenarioCatalog';
 
 function formatTimestamp(value) {
   if (!value) return 'Just now';
@@ -9,19 +10,6 @@ function formatTimestamp(value) {
     hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
   }).format(timestamp);
 }
-
-const defaultScenarios = [
-  { scenario_id: 'wet_well_high_level', name: 'Lift Station — Wet-Well High-High Level' },
-  { scenario_id: 'screen_differential_pressure', name: 'Inlet Works — Screen Differential Pressure High' },
-  { scenario_id: 'low_do_ammonia_rise', name: 'Aeration — Low DO / Ammonia Rise' },
-  { scenario_id: 'valve_restriction', name: 'Pump-02 — Valve Restriction' },
-  { scenario_id: 'bearing_wear', name: 'Compressor-01 — Bearing Wear' },
-  { scenario_id: 'seal_leak', name: 'Pump-02 — Seal Leak' },
-  { scenario_id: 'sensor_fault', name: 'Filter-01 — Sensor Fault' },
-  { scenario_id: 'tank_overflow', name: 'Tank-01 — High Level' },
-  { scenario_id: 'compressor_overspeed', name: 'Compressor-01 — Overspeed' },
-  { scenario_id: 'pump_cavitation', name: 'Pump-02 — Cavitation' },
-];
 
 export default function ScenarioLab({
   scenarios,
@@ -39,7 +27,8 @@ export default function ScenarioLab({
   onTriggerAlarmRepeat,
 }) {
   const [error, setError] = useState('');
-  const choices = scenarios.length ? scenarios : defaultScenarios;
+  const { scenarios: choices, withSop, withoutEquipmentSop } = resolvePrimaryScenarioCatalog(scenarios);
+  const selectedDetails = choices.find((scenario) => scenario.scenario_id === selectedScenario);
   const recoverySupported = ['valve_restriction', 'valve_restriction_cascade', 'scenario_a'].includes(simulationStatus.scenario_id);
 
   const start = async () => {
@@ -53,21 +42,33 @@ export default function ScenarioLab({
       <header>
         <p className="text-xs font-mono uppercase tracking-[0.22em] text-[#009530] font-bold">DEMO & SIMULATION</p>
         <h1 className="mt-2 text-3xl font-bold text-[#26352C]">Scenario Lab</h1>
-        <p className="mt-2 text-[#64736A]">Run wastewater process scenarios and review the resulting alarm on the Operator HMI.</p>
+        <p className="mt-2 text-[#64736A]">Ten primary simulated incident and monitoring cases. Each run is retained as a separate incident record.</p>
       </header>
 
       <section className="rounded-2xl border border-[#D8E2DA] bg-white p-6 space-y-5 shadow-sm">
         <label className="block text-sm font-semibold text-[#26352C]" htmlFor="scenario-select">Scenario</label>
-        <select id="scenario-select" value={selectedScenario} onChange={(e) => onSelectScenario(e.target.value)} disabled={simulating || isIncident} className="w-full h-12 px-4 rounded-lg bg-white border border-[#D8E2DA] text-[#26352C] focus:outline-none focus:border-[#009530] disabled:opacity-50">
-          {choices.map((scenario) => <option key={scenario.scenario_id} value={scenario.scenario_id}>{scenario.name || scenario.scenario_id}</option>)}
+        <select id="scenario-select" value={selectedScenario} onChange={(e) => onSelectScenario(e.target.value)} disabled={simulating} className="w-full h-12 px-4 rounded-lg bg-white border border-[#D8E2DA] text-[#26352C] focus:outline-none focus:border-[#009530] disabled:opacity-50">
+          <optgroup label="WITH MATCHING SOP">
+            {withSop.map((scenario) => <option key={scenario.scenario_id} value={scenario.scenario_id}>{scenario.name} · {scenario.sop_id} · Draft, not approved</option>)}
+          </optgroup>
+          <optgroup label="WITHOUT SPECIFIC EQUIPMENT-FAILURE SOP">
+            {withoutEquipmentSop.map((scenario) => <option key={scenario.scenario_id} value={scenario.scenario_id}>{scenario.name} · No specific equipment-failure SOP</option>)}
+          </optgroup>
         </select>
 
+        <div className="rounded-lg border border-[#D8E2DA] bg-[#F7FAF7] px-4 py-3 text-xs text-[#405647]">
+          <strong>{selectedDetails?.sop_id ? `${selectedDetails.sop_id} · ${selectedDetails.sop_title || ''}` : 'No directly applicable equipment-failure SOP retrieved'}</strong>
+          <p className="mt-1">{selectedDetails?.sop_id ? `${selectedDetails.sop_approval_status || 'Draft for review — not approved'} · Reference only` : 'General safety and management procedures may still apply. No unrelated equipment procedure is presented as a match.'}</p>
+          {selectedDetails && <p className="mt-1">Equipment: {selectedDetails.equipment_id || selectedDetails.target_equipment || 'not recorded'} · Alarm: {selectedDetails.alarm_id || 'monitoring event'}</p>}
+          <span>All generated readings are SIMULATED; they are not live PLC telemetry.</span>
+        </div>
+
         <div className="flex flex-wrap items-center gap-3">
-          <button onClick={start} disabled={simulating || isIncident} className="ml-auto h-11 px-5 rounded-lg bg-[#009530] hover:bg-[#006B35] disabled:bg-[#E8ECE8] disabled:text-[#64736A] text-white font-bold text-sm flex items-center gap-2 cursor-pointer transition-colors shadow-sm">
-            <Play className="w-4 h-4 fill-current" /> {simulating ? 'SCENARIO RUNNING' : isIncident ? 'OPEN INCIDENT ACTIVE' : 'START SCENARIO'}
+          <button onClick={start} disabled={simulating} className="ml-auto h-11 px-5 rounded-lg bg-[#009530] hover:bg-[#006B35] disabled:bg-[#E8ECE8] disabled:text-[#64736A] text-white font-bold text-sm flex items-center gap-2 cursor-pointer transition-colors shadow-sm">
+            <Play className="w-4 h-4 fill-current" /> {simulating ? 'SCENARIO RUNNING' : isIncident ? 'START ANOTHER SCENARIO' : 'START SCENARIO'}
           </button>
         </div>
-        {simulating && <div className="flex items-center gap-2 text-sm text-[#155EEF]"><Zap className="w-4 h-4 animate-pulse" /> Scenario accepted. Waiting for the event pipeline; the HMI dashboard will update when the incident is published.</div>}
+        {simulating && <div className="flex items-center gap-2 text-sm text-[#155EEF]"><Zap className="w-4 h-4 animate-pulse" /> Scenario accepted. Waiting for the event pipeline; the HMI dashboard will update when the incident is published. Earlier incidents remain in Incident History.</div>}
         {simulationStatus.status === 'awaiting_corrective_action' && (
           <div className="rounded-lg border border-[#B7791F]/30 bg-[#FEF0C7] p-5 text-sm text-[#26352C] space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#B7791F]/20 pb-3">

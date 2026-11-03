@@ -298,6 +298,7 @@ export async function logOperatorAction(params) {
       event_id,
       operator,
       action_type,
+      alarm_id: params.alarm_id || params.alarmId || undefined,
       notes,
       timestamp,
     }),
@@ -372,6 +373,76 @@ export async function compileHandover(shiftStart, shiftEnd) {
   }
 
   return data;
+}
+
+export async function getAlarmHistory(filters = {}) {
+  const requestPage = async (offset) => {
+    const query = new URLSearchParams({ limit: '500', offset: String(offset) });
+    for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
+    const res = await fetch(`${API_BASE}/alarms/history?${query}`);
+    if (!res.ok) throw new Error(`Alarm history request failed: ${res.status}`);
+    return res.json();
+  };
+  const first = await requestPage(0);
+  if (!first.has_more) return first;
+  const pages = await Promise.all(Array.from({ length: Math.ceil((first.count - first.alarms.length) / 500) }, (_, index) => requestPage((index + 1) * 500)));
+  return { ...first, alarms: [ ...first.alarms, ...pages.flatMap((page) => page.alarms) ], has_more: false };
+}
+
+export async function getCurrentHandover() {
+  const res = await fetch(`${API_BASE}/handover/current`);
+  if (!res.ok) throw new Error(`Current handover request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getHandoverHistory(filters = {}) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
+  let res;
+  try { res = await fetch(`${API_BASE}/handover/records${query.size ? `?${query}` : ''}`); }
+  catch (error) {
+    throw new Error(`Could not reach OpsLens API at ${API_BASE}: ${error.message || 'network request failed'}. Check the backend service and VITE_API_BASE_URL.`);
+  }
+  if (!res.ok) throw await handoverApiError('Handover history request failed', res);
+  const data = await res.json();
+  if (!Array.isArray(data.handovers)) throw new Error('Handover history response did not contain a handovers list.');
+  return data.handovers;
+}
+
+export async function getHandoverRecord(handoverId) {
+  const res = await fetch(`${API_BASE}/handover/records/${encodeURIComponent(handoverId)}`);
+  if (!res.ok) throw await handoverApiError('Handover record request failed', res);
+  return res.json();
+}
+
+export async function submitHandover(payload) {
+  const res = await fetch(`${API_BASE}/handover/records`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await handoverApiError('Handover submit failed', res);
+  return res.json();
+}
+
+export async function respondToHandoverItem(handoverId, itemId, payload) {
+  const res = await fetch(`${API_BASE}/handover/records/${encodeURIComponent(handoverId)}/items/${encodeURIComponent(itemId)}/response`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await handoverApiError('Handover item response failed', res);
+  return res.json();
+}
+
+export async function confirmHandover(handoverId, payload) {
+  const res = await fetch(`${API_BASE}/handover/records/${encodeURIComponent(handoverId)}/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await handoverApiError('Handover confirmation failed', res);
+  return res.json();
+}
+
+async function handoverApiError(prefix, response) {
+  const body = await response.json().catch(() => ({}));
+  const detail = typeof body.detail === 'string' ? body.detail : response.statusText || 'Unknown server error';
+  return new Error(`${prefix} (HTTP ${response.status}): ${detail}`);
 }
 
 /**

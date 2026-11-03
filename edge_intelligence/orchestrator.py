@@ -190,6 +190,10 @@ class OpsLensOrchestrator:
         If a CandidateEvent is formed or updated, fans out a concurrent pipeline task.
         """
         self.time_series.process(reading)
+        # A later false alarm-input reading records a return-to-normal transition.
+        # This telemetry state change is independent of incident resolution.
+        if str(reading.tag).upper().startswith("ALM-") and reading.value is False:
+            self.db.record_alarm_normal_reading(reading.tag, reading.timestamp, reading.data_source)
         candidate = self.dedup.process_reading(reading)
         if candidate is not None:
             event_id = candidate.event_id
@@ -388,7 +392,7 @@ class OpsLensOrchestrator:
                 "ACKNOWLEDGE": "ACKNOWLEDGED", "ACKNOWLEDGED": "ACKNOWLEDGED",
                 "MARK_UNRESOLVED": "UNRESOLVED",
             }.get(latest_action, "OPEN")
-        is_open = status not in ("RESOLVED", "ACKNOWLEDGED")
+        is_open = status != "RESOLVED"
 
         candidate_obj = candidates[0] if candidates else None
         correlated_obj = correlated[0] if correlated else None

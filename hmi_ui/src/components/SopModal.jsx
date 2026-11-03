@@ -24,9 +24,9 @@ export default function SopModal({ isOpen, onClose, sopData }) {
   }, [isOpen, sopId, sourceRevision, sourceHash, reloadKey]);
   if (!isOpen) return null;
 
-  const rawSteps = (document?.steps && document.steps.length > 0) ? document.steps : (sopData?.steps || []);
-  const steps = rawSteps.map((instruction, idx) => ({ step_number: idx + 1, instruction }));
   const contentPages = document?.content_pages || [];
+  const rawSteps = (document?.steps && document.steps.length > 0) ? document.steps : (contentPages.length > 0 ? [] : (sopData?.steps || []));
+  const steps = rawSteps.map((instruction, idx) => ({ step_number: idx + 1, instruction }));
   const retrievedChunks = sopData?.retrieved_chunks || sopData?.chunks || [];
   const hasPdfSource = Boolean(document?.source_pdf);
   const approvalVerified = document?.approved === true && document?.approval_status === 'approved' && Boolean(document?.approval_reference);

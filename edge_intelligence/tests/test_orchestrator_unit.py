@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from models import CandidateEvent, CorrelatedEvent, CorrelatedDeviation, EventStory, OperatorAction, TagReading, SopMatch, Guidance
+from models import CandidateEvent, CorrelatedEvent, CorrelatedDeviation, EventStory, IndividualAlarmRecord, OperatorAction, TagReading, SopMatch, Guidance
 from database import Database
 from orchestrator import OpsLensOrchestrator
 from api.routes import create_app
@@ -23,7 +23,9 @@ from alarm_priority import AlarmPriorityInterpreter
 class TestOrchestratorUnit(unittest.TestCase):
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
+        test_root = Path(__file__).resolve().parents[1] / ".test-tmp"
+        test_root.mkdir(exist_ok=True)
+        self.temp_dir = tempfile.mkdtemp(dir=test_root)
         self.db_path = Path(self.temp_dir) / "test_orch_unit.db"
         self.db = Database(db_path=self.db_path)
         self.orchestrator = OpsLensOrchestrator(db=self.db)
@@ -174,6 +176,41 @@ class TestOrchestratorUnit(unittest.TestCase):
             "action_type": "START_MOTOR"
         })
         self.assertEqual(resp_fail.status_code, 400)
+
+    def test_api_acknowledge_alarm_persists_status_and_rejects_duplicate_click(self):
+        event_id = str(uuid.uuid4())
+        alarm_id = str(uuid.uuid4())
+        self.db.save_event_story(EventStory(event_id=event_id, steps=[], causal_label="Active pressure alarm"))
+        self.db.save_individual_alarm(event_id, IndividualAlarmRecord(
+            alarm_id=alarm_id, source_event_id=event_id, tag="ALM-P02-HP", equipment_id="Pump-02",
+            value=True, first_seen_timestamp="2026-11-03T10:00:00Z", last_seen_timestamp="2026-11-03T10:00:00Z",
+        ))
+        payload = {
+            "event_id": event_id, "alarm_id": alarm_id, "operator": "Demo Operator",
+            "action_type": "ACKNOWLEDGE", "notes": "Reviewed active pressure alarm.",
+            "timestamp": "2026-11-03T10:05:00Z",
+        }
+        failed = self.client.post("/api/actions", json={**payload, "alarm_id": "not-linked"})
+        self.assertEqual(failed.status_code, 400)
+        self.assertEqual(self.db.get_operator_actions(event_id), [])
+        first = self.client.post("/api/actions", json=payload)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertFalse(first.json()["already_acknowledged"])
+        self.assertEqual(first.json()["alarm_state"], "ACTIVE — ACKNOWLEDGED")
+        self.assertFalse(first.json()["writes_to_plc"])
+
+        repeated = self.client.post("/api/actions", json=payload)
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertTrue(repeated.json()["already_acknowledged"])
+        self.assertEqual(len(self.db.get_operator_actions(event_id)), 1)
+        alarm = self.db.get_individual_alarms(event_id)[0]
+        self.assertEqual(alarm["lifecycle_state"], "ACKNOWLEDGED")
+        self.assertIsNone(alarm["cleared_timestamp"])
+        self.assertEqual(len(self.db.get_alarm_transitions(alarm_id)), 1)
+        self.assertIn(event_id, self.db.get_open_event_ids())
+        history = self.client.get("/api/alarms/history", params={"incident_id": event_id}).json()
+        self.assertEqual(history["alarms"][0]["status"], "ACKNOWLEDGED")
+        self.assertEqual(history["alarms"][0]["acknowledged_by"], "Demo Operator")
 
     def test_resolution_requires_later_clear_alarm_reading(self):
         """An operator cannot resolve an incident until a later source value is clear."""

@@ -46,6 +46,10 @@ The copilot is **advisory and read-only**. It does not acknowledge alarms, chang
 
 Set `OPSLENS_LLM_PROVIDER` and the matching key in the environment. For Groq, set `OPSLENS_LLM_PROVIDER=groq` and `GROQ_API_KEY`; the default model is `openai/gpt-oss-20b`, and `OPSLENS_LLM_MODEL` and `GROQ_API_ENDPOINT` can override the model and endpoint. Do not put keys in source or commit local environment files. If the provider is unset, times out, or returns ungrounded JSON, the operator sees a clear deterministic-fallback status. Provider health reports verified only after a successful inference in the current backend process.
 
+### Shift handover configuration
+
+The current shift window is derived from the backend environment; no shift times are assumed. Set `OPSLENS_SHIFT_NAME`, `OPSLENS_SHIFT_START`, and `OPSLENS_SHIFT_END` (24-hour `HH:MM`, such as `18:00` and `06:00` for an overnight shift). The configured window is evaluated in the backend host's local timezone. If either time is missing or invalid, the UI shows **Shift timing not configured** and blocks submission until configuration is supplied. Shift narrative generation uses a configured local model only; external LLM providers do not receive handover incident records.
+
 ---
 
 ## Project Structure

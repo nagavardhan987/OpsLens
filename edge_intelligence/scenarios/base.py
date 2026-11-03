@@ -44,6 +44,10 @@ class BaseScenario(ABC):
         """
         pass
 
+    def get_reading_metadata(self, tag: str, elapsed_seconds: float) -> Dict[str, Any]:
+        """Optional per-sample metadata; source remains the synthetic generator."""
+        return {}
+
     def is_complete(self, elapsed_seconds: float) -> bool:
         """Check if scenario reached its configured duration."""
         return elapsed_seconds >= self.duration_seconds

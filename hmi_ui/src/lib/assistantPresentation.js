@@ -2,7 +2,7 @@ export function assistantDisplayStatus(answer) {
   if (answer?.fallback_used === true || answer?.llm_used !== true) {
     return { text: 'Evidence-based answer', tone: 'evidence' };
   }
-  return { text: 'AI-generated', tone: 'ai' };
+  return { text: 'AI-generated answer', tone: 'ai' };
 }
 
 export function assistantFallbackExplanation(answer) {

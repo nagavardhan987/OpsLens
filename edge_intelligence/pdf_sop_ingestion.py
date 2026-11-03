@@ -123,7 +123,7 @@ def _extraction_warnings(pdf_bytes: bytes) -> List[str]:
 
 
 def list_sop_library() -> List[Dict[str, Any]]:
-    """List bundled JSON procedures and locally ingested PDFs for the UI."""
+    """List locally ingested PDFs and each procedure registered in bundled manuals."""
     docs: Dict[str, Dict[str, Any]] = {}
     for path in sorted(SOP_DIR.glob("*.json")):
         try:
@@ -154,6 +154,40 @@ def list_sop_library() -> List[Dict[str, Any]]:
                 docs[f"{item['sop_id']}:{item.get('revision', 'unknown')}:{item.get('sha256', '')}"] = {**item, "storage_type": "local_pdf"}
             except (OSError, json.JSONDecodeError, KeyError):
                 continue
+    # A bundled manual is one source file containing distinct, page-addressable
+    # procedures. Expose each registered procedure as a searchable library item
+    # without duplicating or re-ingesting the PDF.
+    try:
+        from demo_sop_sections import DEMO_SOP_SECTIONS, load_demo_sop_document
+        manuals = [json.loads(path.read_text(encoding="utf-8")) for path in PDF_DIR.glob("*.json")
+                   if json.loads(path.read_text(encoding="utf-8")).get("sop_id") == "SOP-MAN-000"]
+        if manuals:
+            manual = max(manuals, key=lambda item: item.get("indexed_at", ""))
+            for entry in manual.get("sop_register", []):
+                sop_id = entry.get("sop_id")
+                if sop_id not in DEMO_SOP_SECTIONS:
+                    continue
+                section_document = load_demo_sop_document(sop_id)
+                docs[f"{sop_id}:manual:{manual.get('sha256', '')}"] = {
+                    **entry,
+                    "sop_id": sop_id,
+                    "title": entry.get("title", sop_id),
+                    "equipment": entry.get("process_area", ""),
+                    "revision": manual.get("revision", "0"),
+                    "revision_label": manual.get("revision_label", "0 (Draft for review)"),
+                    "approved": False,
+                    "approval_status": "draft",
+                    "approval_reference": None,
+                    "document_status": manual.get("document_status", "Reference only — not approved."),
+                    "source_pdf": manual.get("source_pdf"),
+                    "sha256": manual.get("sha256"),
+                    "source_pages": (section_document or {}).get("source_pages", list(DEMO_SOP_SECTIONS[sop_id]["pages"])),
+                    "content_available": bool(section_document and section_document.get("content_pages")),
+                    "storage_type": "local_pdf_section",
+                    "extraction_status": manual.get("extraction_status", "unknown"),
+                }
+    except (OSError, ValueError, ImportError):
+        logger.exception("Unable to expand bundled SOP register into library records")
     return sorted(docs.values(), key=lambda item: item.get("title", "").lower())
 
 

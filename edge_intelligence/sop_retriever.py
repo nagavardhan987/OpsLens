@@ -31,6 +31,33 @@ from tag_registry import get_tag_entry
 
 logger = logging.getLogger("opslens.sop_retriever")
 
+PRIMARY_DEMO_SOPS = {
+    "ALM-WW-101-HH": "SOP-LFT-001",
+    "P101-FAULT": "SOP-LFT-001",
+    "FIT-101-P1-FLW": "SOP-LFT-001",
+    "LIT-101-WWL": "SOP-LFT-001",
+    "ALM-SCR-110-DP": "SOP-INL-001",
+    "DPT-110-SCR": "SOP-INL-001",
+    "ALM-RAS-P1-FAIL": "SOP-BIO-002",
+    "ALM-SLB-201-HIGH": "SOP-BIO-002",
+    "RAS-FLOW": "SOP-BIO-002",
+    "RAS-P1-CUR": "SOP-BIO-002",
+    "SLB-201-DEPTH": "SOP-BIO-002",
+    "ALM-AER-201-FOAM": "SOP-BIO-001", "AER-201-FOAM-DEPTH": "SOP-BIO-001",
+    "AER-201-SLUDGE-AGE": "SOP-BIO-001", "AER-201-WAS-FLOW": "SOP-BIO-001",
+    "ALM-GAS-601-HIGH": "SOP-GAS-001", "GAS-601-PRESS": "SOP-GAS-001",
+    "GAS-601-FILL": "SOP-GAS-001", "CHP-601-RUN": "SOP-GAS-001", "FLR-601-RUN": "SOP-GAS-001",
+    "ALM-SLD-701-CAPTURE": "SOP-SLD-001", "SLD-701-CAPTURE": "SOP-SLD-001",
+    "SLD-701-CENTRATE-NH4": "SOP-SLD-001", "SLD-701-BOWL-RPM": "SOP-SLD-001",
+    "ALM-LAB-901-DUE": "SOP-LAB-001", "LAB-901-SAMPLE-DUE": "SOP-LAB-001",
+    "LAB-901-CAL-DUE": "SOP-LAB-001", "LAB-901-RESULT-PENDING": "SOP-LAB-001",
+}
+PRIMARY_DEMO_NO_SPECIFIC_SOP_TAGS = {
+    "ALM-C01-VB", "CMP-01-VIB", "CMP-01-TMP", "CMP-01-CUR",
+    "ALM-P02-HP", "VLV-04-POS", "FIT-02-FLW", "MOT-02-CUR",
+    "ALM-FLT-401-SENSOR", "FLT-401-PRI-NTU",
+}
+
 _EMBED_MODEL = None
 _QDRANT_STORE = None
 _QDRANT_LAST_INIT_ATTEMPT = 0.0
@@ -293,6 +320,12 @@ class SopRetriever:
             except (KeyError, AttributeError):
                 equipment_filter = None
 
+        primary_demo_result = self._retrieve_primary_demo_reference(
+            event_id, primary_tag, equipment_filter, query_context, persist,
+        )
+        if primary_demo_result is not None:
+            return primary_demo_result
+
         # Attempt Qdrant semantic search
         match = None
         retrieval_method = "qdrant_vector_search"
@@ -463,6 +496,7 @@ class SopRetriever:
             chunks=retrieved_chunks,
             rag_trace=rag_trace,
             retrieval_status=retrieval_status,
+            retrieval_state={"match_found": "MATCH_FOUND", "no_match": "NO_MATCH", "unavailable": "RETRIEVAL_UNAVAILABLE"}.get(retrieval_status, "RETRIEVAL_UNAVAILABLE"),
             retrieval_error=retrieval_error,
         )
 
@@ -475,3 +509,73 @@ class SopRetriever:
             f"{score_name}={raw_similarity:.4f} method={retrieval_method}"
         )
         return sop_match
+
+    def _retrieve_primary_demo_reference(self, event_id, primary_tag, equipment, query_context, persist):
+        """Resolve curated demo SOPs directly to uploaded manual pages."""
+        sop_id = PRIMARY_DEMO_SOPS.get(primary_tag or "")
+        if not sop_id and primary_tag not in PRIMARY_DEMO_NO_SPECIFIC_SOP_TAGS:
+            return None
+        if sop_id:
+            from demo_sop_sections import load_demo_sop_document
+            document = load_demo_sop_document(sop_id)
+            if document is None:
+                match = SopMatch(
+                    event_id=event_id, sop_id=sop_id,
+                    sop_title=f"{sop_id} source unavailable",
+                    title=f"{sop_id} source unavailable", revision="0",
+                    match_score=0.0, steps=[], source="unavailable",
+                    retrieval_method="bundled_pdf_section", retrieval_status="unavailable",
+                    retrieval_state="RETRIEVAL_UNAVAILABLE",
+                    retrieval_error="source_pdf_unavailable", query_context=query_context,
+                    why_retrieved={"retrieval_status": "unavailable",
+                                   "message": "The uploaded manual source pages could not be read."},
+                    retrieved_chunks=[], chunks=[],
+                )
+            else:
+                chunks = [{
+                    "sop_id": sop_id, "document_id": sop_id,
+                    "text": page["text"], "page": page["page"],
+                    "section": f"Source page {page['page']}",
+                    "section_title": document["title"],
+                    "step_title": document["title"],
+                    "revision": document.get("revision"),
+                    "source_pdf": document.get("source_pdf"),
+                    "document_status": document.get("document_status"),
+                    "approval_status": document.get("approval_status"),
+                    "approved": False,
+                } for page in document.get("content_pages", []) if page.get("text")]
+                trace = {"event_id": event_id, "selected_sop_id": sop_id,
+                         "retrieval_method": "bundled_pdf_section", "retrieval_status": "match_found",
+                         "retrieved_chunks": chunks, "source_pages": document.get("source_pages", [])}
+                RAG_TRACE_STORE[event_id] = trace
+                match = SopMatch(
+                    event_id=event_id, sop_id=sop_id, sop_title=document["title"],
+                    title=document["title"], revision=document.get("revision", "0"),
+                    match_score=0.0, steps=[chunk["text"] for chunk in chunks],
+                    source="bm25", retrieval_method="bundled_pdf_section",
+                    retrieval_status="match_found", query_context=query_context,
+                    retrieval_state="MATCH_FOUND",
+                    why_retrieved={"retrieval_status": "match_found", "equipment": equipment,
+                                   "alarm": primary_tag, "source_pdf": document.get("source_pdf"),
+                                   "source_pages": document.get("source_pages"),
+                                   "document_status": document.get("document_status")},
+                    retrieved_chunks=chunks, chunks=chunks, rag_trace=trace,
+                )
+        else:
+            reason = "No specific applicable equipment-failure SOP was retrieved for this primary demonstration scenario."
+            trace = {"event_id": event_id, "selected_sop_id": "SOP-NONE",
+                     "retrieval_method": "primary_demo_scope", "retrieval_status": "no_match",
+                     "retrieved_chunks": [], "scope_note": reason}
+            RAG_TRACE_STORE[event_id] = trace
+            match = SopMatch(
+                event_id=event_id, sop_id="SOP-NONE", sop_title="No specific applicable equipment-failure SOP retrieved",
+                title="No specific applicable equipment-failure SOP retrieved", revision="",
+                match_score=0.0, steps=[], source="bm25", retrieval_method="primary_demo_scope",
+                retrieval_status="no_match", query_context=query_context,
+                retrieval_state="NO_MATCH",
+                why_retrieved={"retrieval_status": "no_match", "equipment": equipment, "message": reason},
+                retrieved_chunks=[], chunks=[], rag_trace=trace,
+            )
+        if persist and self.db:
+            self.db.save_sop_match(match)
+        return match

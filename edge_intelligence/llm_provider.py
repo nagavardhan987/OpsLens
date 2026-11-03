@@ -359,7 +359,7 @@ def _call_groq(prompt: str, timeout: float) -> str:
         # Quota exhaustion is terminal until the account/limits change. For a
         # transient window limit, make at most one short retry and honor the
         # provider's delay only when it fits the configured latency budget.
-        max_wait = max(0.0, float(os.environ.get("OPSLENS_GROQ_MAX_RETRY_WAIT", "0.5")))
+        max_wait = max(0.0, float(os.environ.get("OPSLENS_GROQ_MAX_RETRY_WAIT", "2.5")))
         body_text = ""
         try:
             body_text = json.dumps(resp.json()).lower()

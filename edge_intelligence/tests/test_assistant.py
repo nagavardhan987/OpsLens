@@ -288,7 +288,7 @@ class TestIncidentAssistant(unittest.TestCase):
         event["sop_match"] = {"sop_id": "SOP-NONE", "retrieved_chunks": [], "retrieval_status": "no_match"}
         result = build_assistant_response(event, "What actions to be taken to resolve this problem?")
         self.assertIn("general read-only verification steps", result["question_answer"])
-        self.assertIn("consult the applicable plant-approved SOP", result["question_answer"])
+        self.assertIn("Consult the applicable plant-approved SOP", result["question_answer"])
         self.assertNotIn("A physical cause has not been confirmed", result["question_answer"])
 
     def test_api_reports_unknown_incident_and_validation_errors(self):

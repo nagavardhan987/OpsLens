@@ -19,7 +19,7 @@ import os
 import threading
 import uuid
 from time import perf_counter
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 from fastapi import BackgroundTasks, FastAPI, APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -27,15 +27,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from orchestrator import OpsLensOrchestrator
-from scenarios import list_available_scenarios
+from scenarios import list_primary_demo_scenarios
 from generator import SyntheticDataGenerator
 from tag_registry import TAG_REGISTRY
 from assistant import answer_incident_question, resolve_event_sop_reference
 from assistant_cache import cache_key, clear as clear_assistant_cache, context_fingerprint, get as cache_get, put as cache_put, question_is_volatile
 from context_builder import ContextBuilder, ContextEventNotFound, InvalidContextTimestamp, parse_timestamp
-from models import IncidentContext, TagReading
+from models import IncidentContext, TagReading, current_iso_utc
 from llm_provider import configuration_error, provider_status, selected_provider
 from adapters.opcua_adapter import OPCUAAdapter
+from operational_history import (build_handover_summary, configured_shift_window,
+                                 generate_shift_narrative, list_alarm_history)
 
 logger = logging.getLogger(__name__)
 _sop_ingestion_jobs: Dict[str, Dict[str, Any]] = {}
@@ -142,6 +144,13 @@ def _incident_failure(event_id: str, code: str, message: str) -> HTTPException:
 def _load_bundled_sop(sop_id: str) -> Optional[Dict[str, Any]]:
     """Load a bundled SOP directly so its full procedure is available offline."""
     try:
+        from demo_sop_sections import load_demo_sop_document
+        demo_document = load_demo_sop_document(sop_id)
+        if demo_document:
+            return demo_document
+    except Exception:
+        pass
+    try:
         from pathlib import Path
         sop_dir = Path(__file__).resolve().parent.parent / "sop_documents"
         if sop_dir.exists():
@@ -181,6 +190,7 @@ class ActionRequest(BaseModel):
     event_id: str
     operator: str
     action_type: str
+    alarm_id: Optional[str] = None
     notes: Optional[str] = None
     timestamp: Optional[str] = None
 
@@ -194,6 +204,29 @@ class MarkUnresolvedRequest(BaseModel):
 class HandoverRequest(BaseModel):
     shift_start: str
     shift_end: str
+
+
+class HandoverSubmitRequest(BaseModel):
+    shift_date: str = Field(min_length=8, max_length=20)
+    shift_name: str = Field(min_length=1, max_length=80)
+    shift_start: str
+    shift_end: str
+    outgoing_operator: str = Field(min_length=1, max_length=120)
+    incoming_operator: Optional[str] = Field(default=None, max_length=120)
+    fields: Dict[str, str] = Field(default_factory=dict)
+
+
+class HandoverItemResponseRequest(BaseModel):
+    operator: str = Field(min_length=1, max_length=120)
+    comment: Optional[str] = Field(default=None, max_length=2000)
+    acknowledged: bool = False
+
+
+class HandoverConfirmRequest(BaseModel):
+    incoming_operator: str = Field(min_length=1, max_length=120)
+    signature_name: str = Field(min_length=1, max_length=120)
+    face_to_face_confirmed: bool = False
+    walkthrough_confirmed: bool = False
 
 
 def _timestamp_is_after(value: Optional[str], reference: Optional[str]) -> bool:
@@ -398,6 +431,27 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
             })
         return {"events": summaries, "count": len(summaries)}
 
+    @router.get("/alarms/history")
+    async def get_alarm_history(
+        q: Optional[str] = None, status: Optional[str] = None,
+        start: Optional[str] = None, end: Optional[str] = None,
+        alarm_id: Optional[str] = None, equipment: Optional[str] = None,
+        process_area: Optional[str] = None, severity: Optional[str] = None,
+        priority: Optional[str] = None, operator: Optional[str] = None,
+        incident_id: Optional[str] = None, limit: int = Query(500, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
+    ):
+        """Return persistent alarm occurrences and their linked incident/action history."""
+        filters = {"q": q, "status": status, "start": start, "end": end,
+                   "alarm_id": alarm_id, "equipment": equipment, "process_area": process_area,
+                   "severity": severity, "priority": priority, "operator": operator,
+                   "incident_id": incident_id}
+        alarms = list_alarm_history(orch.db, filters)
+        return {"alarms": alarms[offset:offset + limit], "count": len(alarms),
+                "offset": offset, "limit": limit, "has_more": offset + limit < len(alarms),
+                "recorded_count": len(alarms), "retention": "Persistent local SQLite records",
+                "advisory_only": True}
+
     @router.get("/events/stream")
     async def stream_events(
         request: Request,
@@ -459,6 +513,7 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
         full_event = orch.get_full_event(event_id)
         if full_event is None:
             raise HTTPException(status_code=404, detail=f"Event '{event_id}' not found.")
+        full_event["individual_alarms"] = orch.db.get_individual_alarms(event_id)
         full_event["sop_resolution"], full_event["resolved_sop_sources"] = resolve_event_sop_reference(full_event)
         steps = (full_event.get("story") or {}).get("steps") or []
         alarm_step = next((step for step in reversed(steps) if str(step.get("tag", "")).startswith("ALM-")), None)
@@ -901,6 +956,27 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
         Rejects invalid event IDs and forbidden machine/PLC control commands.
         """
         try:
+            if req.action_type.strip().upper() in ("ACKNOWLEDGE", "ACKNOWLEDGED") and req.alarm_id:
+                action, created = orch.db.record_alarm_acknowledgement(
+                    event_id=req.event_id,
+                    alarm_id=req.alarm_id,
+                    operator=req.operator,
+                    notes=req.notes,
+                    timestamp=req.timestamp,
+                )
+                return {
+                    **(action.model_dump() if action else {
+                        "event_id": req.event_id,
+                        "alarm_id": req.alarm_id,
+                        "action_type": "ACKNOWLEDGE",
+                        "operator": req.operator.strip() or "anonymous",
+                        "timestamp": req.timestamp or current_iso_utc(),
+                    }),
+                    "alarm_id": req.alarm_id,
+                    "alarm_state": "ACTIVE — ACKNOWLEDGED",
+                    "already_acknowledged": not created,
+                    "writes_to_plc": False,
+                }
             if req.action_type.upper() in ("RESOLVE", "RESOLVED"):
                 full = orch.get_full_event(req.event_id)
                 if full is None:
@@ -919,6 +995,13 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
                 notes=req.notes,
                 timestamp=req.timestamp
             )
+            transition = {"ACKNOWLEDGE": "ACKNOWLEDGED", "ACKNOWLEDGED": "ACKNOWLEDGED",
+                          "RESOLVE": "RESOLVED", "RESOLVED": "RESOLVED",
+                          "MARK_UNRESOLVED": "UNRESOLVED"}.get(req.action_type.upper())
+            if transition:
+                for alarm in orch.db.get_individual_alarms(req.event_id):
+                    orch.db.record_alarm_transition(alarm["alarm_id"], req.event_id, transition,
+                                                    req.operator, action.timestamp, req.notes)
             return action.model_dump()
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -936,6 +1019,9 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
                 notes=req.reason.strip() if req.reason and req.reason.strip() else None,
                 timestamp=req.timestamp,
             )
+            for alarm in orch.db.get_individual_alarms(event_id):
+                orch.db.record_alarm_transition(alarm["alarm_id"], event_id, "UNRESOLVED",
+                                                req.operator.strip(), action.timestamp, req.reason)
         except ValueError:
             raise HTTPException(status_code=400, detail="Incident status could not be updated.")
         return {
@@ -944,6 +1030,147 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
             "is_open": True,
             "action": action.model_dump(),
         }
+
+    @router.get("/handover/current")
+    async def get_current_handover():
+        """Regenerate the handover from stored records and configured shift timing."""
+        shift = configured_shift_window()
+        start = shift.get("start") if shift else None
+        end = shift.get("end") if shift else None
+        summary = build_handover_summary(orch.db, start, end)
+        summary["sop_reference"] = {
+            "sop_id": "SOP-GEN-003", "title": "Alarm Response and Shift Handover",
+            "revision": "0 (Draft for review)", "approval_status": "Draft for review — not approved",
+            "approved": False, "document_status": "Revision 0 — Draft for review. Approval table is incomplete. REFERENCE ONLY — NOT APPROVED.",
+            "requirements": [
+                "Complete the shift log before handover.",
+                "Conduct a face-to-face handover at the control panel for at least 15 minutes.",
+                "Review open alarms, equipment out of service, active permits and LOTO, process changes, abnormal readings, chemical and polymer stock, and pending laboratory results.",
+                "The incoming operator reviews the log, walks key areas, and signs to accept the plant.",
+                "The outgoing operator remains available until the incoming operator confirms understanding.",
+            ],
+        }
+        previous = orch.db.list_shift_handovers({"date": shift["date"], "shift": shift["name"]}, limit=1) if shift else []
+        summary["latest_handover"] = previous[0] if previous else None
+        summary["current_shift"] = shift or {"name": None, "date": None, "start": None, "end": None,
+                                             "configured": False, "status": "Shift timing not configured"}
+        summary["outgoing_operator_session"] = {"status": "Unavailable", "operator": None,
+                                                 "detail": "No authenticated operator session is configured."}
+        summary["shift_narrative"] = generate_shift_narrative(summary)
+        return summary
+
+    @router.get("/handover/sop-reference")
+    async def handover_sop_reference():
+        return {
+            "sop_id": "SOP-GEN-003", "title": "Alarm Response and Shift Handover",
+            "revision": "0 (Draft for review)", "approval_status": "Draft for review — not approved",
+            "approved": False,
+            "document_status": "Revision 0 — Draft for review. Approval table is incomplete. REFERENCE ONLY — NOT APPROVED.",
+            "requirements": [
+                "Complete the shift log before handover.",
+                "Conduct a face-to-face handover at the control panel for at least 15 minutes.",
+                "Review open alarms, equipment out of service, active permits and LOTO, process changes, abnormal readings, chemical and polymer stock, and pending laboratory results.",
+                "The incoming operator reviews the log, walks key areas, and signs to accept the plant.",
+                "The outgoing operator remains available until the incoming operator confirms understanding.",
+            ],
+        }
+
+    @router.post("/handover/records")
+    async def submit_handover(req: HandoverSubmitRequest):
+        try:
+            start_dt = datetime.fromisoformat(req.shift_start.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(req.shift_end.replace("Z", "+00:00"))
+            if start_dt >= end_dt:
+                raise ValueError("Shift end must be after shift start.")
+            summary = build_handover_summary(orch.db, req.shift_start, req.shift_end)
+            summary["shift_narrative"] = generate_shift_narrative(summary)
+            summary["sop_reference"] = {
+                "sop_id": "SOP-GEN-003", "revision": "0 (Draft for review)",
+                "approval_status": "Draft for review — not approved", "approved": False,
+                "face_to_face": True, "minimum_duration_minutes": 15,
+                "incoming_walkthrough_required": True, "acceptance_signature_required": True,
+            }
+            field_names = ["outgoing_confirmation", "shift_notes", "equipment_observations", "maintenance_updates",
+                           "important_context", "unresolved_issues", "highlighted_alarms", "pending_work",
+                           "equipment_out_of_service", "active_permits_loto", "process_changes", "abnormal_readings",
+                           "chemical_polymer_stock", "pending_laboratory_results"]
+            manual_fields = {name: (req.fields.get(name) or "").strip() or "Not recorded" for name in field_names}
+            entries = []
+            for key in ("open_alarms", "unacknowledged_alarms", "unresolved_incidents", "outstanding_operator_actions"):
+                source_items = summary.get(key) or []
+                if isinstance(source_items, dict):
+                    source_items = source_items.get("items") or []
+                for index, item in enumerate(source_items):
+                    identity = item.get("alarm_record_id") or item.get("incident_id") or item.get("action_id") or index
+                    entries.append({"item_id": f"{key}:{identity}", "category": key, "item": item})
+            for key, value in manual_fields.items():
+                if value != "Not recorded":
+                    entries.append({"item_id": f"manual:{key}", "category": key, "value": value,
+                                    "recorded": True})
+            submitted_at = current_iso_utc()
+            record = {
+                "handover_id": str(uuid.uuid4()), "shift_date": req.shift_date,
+                "shift_name": req.shift_name, "shift_start": req.shift_start, "shift_end": req.shift_end,
+                "outgoing_operator": req.outgoing_operator.strip(), "incoming_operator": (req.incoming_operator or "").strip() or None,
+                "submitted_at": submitted_at, "status": "PENDING_RECEIPT", "summary": summary,
+                "manual_fields": manual_fields, "entries": entries,
+            }
+            orch.db.save_shift_handover(record)
+            return {**record, "item_responses": []}
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.get("/handover/records")
+    async def list_handover_records(
+        date: Optional[str] = None, shift: Optional[str] = None, operator: Optional[str] = None,
+        equipment: Optional[str] = None, incident: Optional[str] = None,
+        limit: int = Query(100, ge=1, le=500),
+    ):
+        records = orch.db.list_shift_handovers({"date": date, "shift": shift, "operator": operator}, limit)
+        if equipment:
+            records = [row for row in records if equipment.casefold() in json.dumps(row.get("entries", []), ensure_ascii=False).casefold()]
+        if incident:
+            records = [row for row in records if incident.casefold() in json.dumps(row.get("summary", {}), ensure_ascii=False).casefold()]
+        for row in records:
+            row["item_responses"] = orch.db.get_handover_item_responses(row["handover_id"])
+        return {"handovers": records, "count": len(records)}
+
+    @router.get("/handover/records/{handover_id}")
+    async def get_handover_record(handover_id: str):
+        record = orch.db.get_shift_handover(handover_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Handover record not found.")
+        record["item_responses"] = orch.db.get_handover_item_responses(handover_id)
+        return record
+
+    @router.post("/handover/records/{handover_id}/items/{item_id}/response")
+    async def respond_to_handover_item(handover_id: str, item_id: str, req: HandoverItemResponseRequest):
+        record = orch.db.get_shift_handover(handover_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Handover record not found.")
+        if not any(entry.get("item_id") == item_id for entry in record.get("entries", [])):
+            raise HTTPException(status_code=404, detail="Handover item not found.")
+        response = orch.db.save_handover_item_response(
+            handover_id, item_id, req.operator.strip(), req.comment.strip() if req.comment and req.comment.strip() else None,
+            req.acknowledged, current_iso_utc(),
+        )
+        return {"response": response, "alarm_or_incident_state_changed": False}
+
+    @router.post("/handover/records/{handover_id}/confirm")
+    async def confirm_handover_record(handover_id: str, req: HandoverConfirmRequest):
+        record = orch.db.get_shift_handover(handover_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Handover record not found.")
+        timestamp = current_iso_utc()
+        try:
+            orch.db.confirm_shift_handover(handover_id, req.incoming_operator.strip(), req.signature_name.strip(), timestamp,
+                                           req.face_to_face_confirmed, req.walkthrough_confirmed)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        record = orch.db.get_shift_handover(handover_id)
+        record["item_responses"] = orch.db.get_handover_item_responses(handover_id)
+        record["alarm_or_incident_state_changed"] = False
+        return record
 
     @router.post("/handover")
     async def compile_handover_post(req: HandoverRequest):
@@ -974,8 +1201,8 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
 
     @router.get("/scenarios")
     async def get_scenarios():
-        """List available scenario archetypes for live simulation."""
-        return {"scenarios": list_available_scenarios()}
+        """List the ten curated primary scenarios; legacy registry IDs remain runnable."""
+        return {"scenarios": list_primary_demo_scenarios()}
 
     @router.post("/scenarios/run")
     async def run_scenario_endpoint(req: ScenarioRunRequest):
@@ -1395,7 +1622,16 @@ def create_app(orchestrator: Optional[OpsLensOrchestrator] = None) -> FastAPI:
     async def get_sop_source_pdf(sop_id: str, revision: Optional[str] = Query(None), sha256: Optional[str] = Query(None)):
         """Serve the preserved original PDF from local edge storage."""
         from pdf_sop_ingestion import get_pdf_path
-        path = get_pdf_path(sop_id, revision or "", sha256 or "")
+        demo_document = None
+        try:
+            from demo_sop_sections import load_demo_sop_document
+            demo_document = load_demo_sop_document(sop_id)
+        except Exception:
+            pass
+        source_id = "SOP-MAN-000" if demo_document else sop_id
+        path = get_pdf_path(source_id,
+                            revision or (demo_document or {}).get("revision", ""),
+                            sha256 or (demo_document or {}).get("sha256", ""))
         if not path.is_file():
             raise HTTPException(status_code=404, detail=f"No source PDF is stored for SOP '{sop_id}'.")
         return FileResponse(

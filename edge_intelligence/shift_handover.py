@@ -12,6 +12,7 @@ from datetime import datetime
 
 from models import HandoverSummary, OperatorAction, EventStory, Evidence, SopMatch, Guidance
 from database import Database
+from operational_history import build_handover_summary
 
 logger = logging.getLogger("opslens.handover")
 if not logger.handlers:
@@ -68,13 +69,27 @@ class ShiftHandoverCompiler:
             f"{len(event_ids)} total events, {len(actions)} actions, {len(open_event_ids)} open events."
         )
 
-        return HandoverSummary(
+        summary = HandoverSummary(
             shift_start=shift_start,
             shift_end=shift_end,
             events=event_ids,
             actions=actions,
             open_events=open_event_ids
         )
+        enriched = build_handover_summary(self.db, shift_start, shift_end)
+        summary.open_alarms = enriched["open_alarms"]
+        summary.unacknowledged_alarms = enriched["unacknowledged_alarms"]
+        summary.unresolved_incidents = enriched["unresolved_incidents"]
+        summary.equipment_out_of_service = enriched["equipment_out_of_service"]
+        summary.active_permits = enriched["active_permits"]
+        summary.loto_status = enriched["loto_status"]
+        summary.process_changes = enriched["process_changes"]
+        summary.abnormal_sensor_readings = enriched["abnormal_sensor_readings"]
+        summary.chemical_and_polymer_stock = enriched["chemical_and_polymer_stock"]
+        summary.pending_laboratory_results = enriched["pending_laboratory_results"]
+        summary.pending_maintenance = enriched["pending_maintenance"]
+        summary.outstanding_operator_actions = enriched["outstanding_operator_actions"]
+        return summary
 
     def get_event_drilldown(self, event_id: str) -> Dict[str, Any]:
         """

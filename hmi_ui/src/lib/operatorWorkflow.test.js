@@ -47,3 +47,14 @@ test('workflow errors never expose raw backend validation text', () => {
   assert.equal(workflowActionFailureMessage('LOG_EVENT', raw), 'The event note was not saved. Check the note and try again.');
   assert.equal(workflowActionFailureMessage('RESOLVE', { status: 400, message: 'internal detail' }), 'Resolution is still locked. A later source-clear reading and operator confirmation are required.');
 });
+
+test('acknowledgement uses the existing audited operator action type', () => {
+  assert.deepEqual(getWorkflowSubmission('ACKNOWLEDGE', 'Reviewed alarm.'), {
+    kind: 'audit', actionType: 'ACKNOWLEDGE', notes: 'Reviewed alarm.',
+  });
+});
+
+test('acknowledgement feedback keeps alarm acknowledgement separate from resolution', () => {
+  assert.match(workflowActionSuccessMessage('ACKNOWLEDGE'), /remains active/);
+  assert.match(workflowActionFailureMessage('ACKNOWLEDGE', new Error()), /state is unchanged; try again/);
+});

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from generator import SyntheticDataGenerator
 from models import TagReading
 from prioritizer import PrioritizationEngine
-from scenarios import get_scenario, list_available_scenarios
+from scenarios import get_scenario, list_available_scenarios, list_primary_demo_scenarios
 from tag_registry import TAG_REGISTRY
 
 
@@ -45,8 +45,11 @@ class WastewaterScenarioTests(unittest.TestCase):
     def test_wet_well_scenario_triggers_correlated_high_level_alarm(self):
         scenario = get_scenario("wet_well_high_level")
         values = scenario.get_tag_values(78, self.nominal)
-        self.assertGreaterEqual(values["LIT-101-WWL"], 85.0)
+        self.assertGreaterEqual(values["LIT-101-WWL"], 3.6)
         self.assertLess(values["FIT-101-DIS"], 1200.0)
+        self.assertLess(values["FIT-101-P1-FLW"], 300.0)
+        self.assertFalse(values["P101-RUN"])
+        self.assertTrue(values["P101-FAULT"])
         self.assertTrue(values["ALM-WW-101-HH"])
         self.assert_trip("FIT-101-DIS", values["FIT-101-DIS"])
         self.assert_trip("LIT-101-WWL", values["LIT-101-WWL"])
@@ -56,8 +59,76 @@ class WastewaterScenarioTests(unittest.TestCase):
         values = get_scenario("screen_differential_pressure").get_tag_values(68, self.nominal)
         self.assertGreaterEqual(values["DPT-110-SCR"], 4.0)
         self.assertTrue(values["ALM-SCR-110-DP"])
+        self.assertLess(values["FIT-110-IN"], self.nominal["FIT-110-IN"])
+        self.assertFalse(values["SCR-110-RAKE-RUN"])
+        self.assertGreaterEqual(values["SCR-110-MOT-CUR"], 14.0)
         self.assert_trip("DPT-110-SCR", values["DPT-110-SCR"])
         self.assert_trip("ALM-SCR-110-DP", values["ALM-SCR-110-DP"])
+
+    def test_ras_pump_failure_precedes_high_sludge_blanket_and_trips_both_alarms(self):
+        scenario = get_scenario("ras_pump_failure")
+        early = scenario.get_tag_values(18, self.nominal)
+        late = scenario.get_tag_values(88, self.nominal)
+        self.assertFalse(early["RAS-P1-RUN"])
+        self.assertEqual(early["RAS-P1-CUR"], 0.0)
+        self.assertTrue(early["ALM-RAS-P1-FAIL"])
+        self.assertTrue(late["ALM-SLB-201-HIGH"])
+        self.assertGreater(late["SLB-201-DEPTH"], 1.5)
+        self.assertLess(late["RAS-FLOW"], 550.0)
+
+    def test_filter_sensor_fault_reports_disagreement_quality_and_stale_metadata(self):
+        scenario = get_scenario("filter_sensor_fault")
+        values = scenario.get_tag_values(28, self.nominal)
+        metadata = scenario.get_reading_metadata("FLT-401-PRI-NTU", 28)
+        self.assertGreater(values["FLT-401-PRI-NTU"], values["FLT-401-RED-NTU"] * 3)
+        self.assertEqual(values["FLT-401-PRI-QUALITY"], "POOR")
+        self.assertEqual(values["FLT-401-PRI-COMMS"], "DISCONNECTED")
+        self.assertTrue(values["ALM-FLT-401-SENSOR"])
+        self.assertEqual(metadata["data_quality"], "STALE")
+        self.assertEqual(metadata["connection_status"], "disconnected")
+
+    def test_primary_demo_registry_contains_exact_ten_scenarios_in_two_groups(self):
+        scenarios = list_primary_demo_scenarios()
+        self.assertEqual(len(scenarios), 10)
+        self.assertEqual([item["demo_group"] for item in scenarios], ["WITH MATCHING SOP"] * 7 + ["WITHOUT SPECIFIC EQUIPMENT-FAILURE SOP"] * 3)
+        self.assertEqual([item["sop_id"] for item in scenarios[:7]], ["SOP-LFT-001", "SOP-INL-001", "SOP-BIO-001", "SOP-BIO-002", "SOP-GAS-001", "SOP-SLD-001", "SOP-LAB-001"])
+        self.assertTrue(all(item["sop_id"] is None for item in scenarios[7:]))
+        self.assertTrue(all(item["source_status"] == "SIMULATED" for item in scenarios))
+
+    def test_primary_demo_sops_resolve_to_manual_pages_and_remain_draft(self):
+        from demo_sop_sections import load_demo_sop_document
+        from assistant import resolve_event_sop_reference
+        for sop_id, phrase in [
+            ("SOP-LFT-001", "Wet well level"),
+            ("SOP-INL-001", "Bar Screen Operation"),
+            ("SOP-BIO-002", "RAS Pump Failure"),
+        ]:
+            with self.subTest(sop_id=sop_id):
+                document = load_demo_sop_document(sop_id)
+                self.assertIsNotNone(document)
+                self.assertFalse(document["approved"])
+                self.assertEqual(document["revision"], "0")
+                joined = "\n".join(page["text"] for page in document["content_pages"])
+                self.assertIn(phrase.casefold(), joined.casefold())
+                resolution, sources = resolve_event_sop_reference({"sop_match": {
+                    "sop_id": sop_id, "sop_title": document["title"], "revision": "0",
+                    "retrieved_chunks": [{"sop_id": sop_id, "document_id": sop_id,
+                        "text": document["content_pages"][-1]["text"], "page": document["content_pages"][-1]["page"]}],
+                }})
+                self.assertEqual(resolution["status"], "reference_unapproved")
+                self.assertTrue(sources)
+                self.assertFalse(sources[0]["approved"])
+                self.assertIn("not approved", sources[0]["document_status"].casefold())
+
+    def test_primary_demo_without_sop_never_returns_a_fake_equipment_procedure(self):
+        from sop_retriever import SopRetriever
+        retriever = SopRetriever()
+        for equipment, tag in [("Compressor-01", "ALM-C01-VB"), ("Pump-02", "ALM-P02-HP"), ("Filter-01", "ALM-FLT-401-SENSOR")]:
+            with self.subTest(equipment=equipment):
+                result = retriever._retrieve_primary_demo_reference("demo-event", tag, equipment, "test", False)
+                self.assertEqual(result.sop_id, "SOP-NONE")
+                self.assertEqual(result.retrieval_status, "no_match")
+                self.assertIn("No specific applicable", result.why_retrieved["message"])
 
     def test_low_do_precedes_ammonia_alarm_in_synthetic_sequence(self):
         scenario = get_scenario("low_do_ammonia_rise")
@@ -105,7 +176,10 @@ class WastewaterScenarioTests(unittest.TestCase):
         cases = [
             ("wet_well_high_level", 78.0, "ALM-WW-101-HH"),
             ("screen_differential_pressure", 68.0, "ALM-SCR-110-DP"),
-            ("low_do_ammonia_rise", 82.0, "ALM-AER-201-NH4"),
+            ("ras_pump_failure", 88.0, "ALM-SLB-201-HIGH"),
+            ("bearing_wear", 78.0, "ALM-C01-VB"),
+            ("valve_restriction", 72.0, "ALM-P02-HP"),
+            ("filter_sensor_fault", 28.0, "ALM-FLT-401-SENSOR"),
         ]
         for scenario_id, elapsed, alarm_tag in cases:
             with self.subTest(scenario=scenario_id):
@@ -119,8 +193,26 @@ class WastewaterScenarioTests(unittest.TestCase):
                 sample = generator.advance_step()
                 by_tag = {reading.tag: reading for reading in sample}
                 self.assertIs(by_tag[alarm_tag].value, True)
+                self.assertTrue(all(reading.data_source == "simulated" for reading in sink.readings))
                 self.assertEqual(len(sink.readings), len(TAG_REGISTRY))
                 self.assertEqual(sink.readings[-1].timestamp, by_tag[sink.readings[-1].tag].timestamp)
+
+    def test_filter_sensor_fault_generator_labels_stale_reading_and_receipt_time(self):
+        class ReadingSink:
+            def __init__(self): self.readings = []
+            def insert_reading(self, reading): self.readings.append(reading)
+        sink = ReadingSink()
+        generator = SyntheticDataGenerator(db=sink, sample_interval=2.0,
+            start_time=datetime(2026, 10, 28, tzinfo=timezone.utc))
+        generator.current_scenario = get_scenario("filter_sensor_fault")
+        generator.scenario_elapsed = 28.0
+        by_tag = {reading.tag: reading for reading in generator.advance_step()}
+        primary = by_tag["FLT-401-PRI-NTU"]
+        self.assertEqual(primary.data_source, "simulated")
+        self.assertEqual(primary.data_quality, "STALE")
+        self.assertEqual(primary.connection_status, "disconnected")
+        self.assertEqual(primary.received_timestamp, "2026-10-28T00:00:00Z")
+        self.assertEqual(primary.timestamp, "2026-10-27T23:58:30Z")
 
 
 if __name__ == "__main__":

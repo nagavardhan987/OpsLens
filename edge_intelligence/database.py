@@ -8,6 +8,7 @@ downstream readers (prioritization, correlation, UI).
 
 import json
 import sqlite3
+import uuid
 from typing import List, Optional, Union, Dict, Any
 from pathlib import Path
 from models import (
@@ -153,6 +154,78 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_individual_alarms_fingerprint
                 ON individual_alarms(fingerprint);
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS alarm_occurrences (
+                    occurrence_id TEXT PRIMARY KEY,
+                    alarm_id TEXT NOT NULL,
+                    incident_id TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    value TEXT,
+                    lifecycle_state TEXT NOT NULL DEFAULT 'ACTIVE',
+                    data_source TEXT NOT NULL DEFAULT 'unknown',
+                    data_quality TEXT NOT NULL DEFAULT 'UNKNOWN',
+                    created_at TEXT NOT NULL
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alarm_occurrences_alarm_ts ON alarm_occurrences(alarm_id, occurred_at)")
+            conn.execute("""INSERT OR IGNORE INTO alarm_occurrences
+                (occurrence_id, alarm_id, incident_id, occurred_at, value, lifecycle_state, data_source, data_quality, created_at)
+                SELECT alarm_id || ':legacy-first', alarm_id, incident_id, first_seen_timestamp, value, lifecycle_state,
+                       'legacy aggregate', 'PARTIAL', created_at FROM individual_alarms""")
+            conn.execute("""INSERT OR IGNORE INTO alarm_occurrences
+                (occurrence_id, alarm_id, incident_id, occurred_at, value, lifecycle_state, data_source, data_quality, created_at)
+                SELECT alarm_id || ':legacy-last', alarm_id, incident_id, last_seen_timestamp, value, lifecycle_state,
+                       'legacy aggregate', 'PARTIAL', created_at FROM individual_alarms
+                WHERE last_seen_timestamp != first_seen_timestamp""")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS alarm_transitions (
+                    transition_id TEXT PRIMARY KEY,
+                    alarm_id TEXT NOT NULL,
+                    incident_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    operator TEXT,
+                    timestamp TEXT NOT NULL,
+                    notes TEXT
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alarm_transitions_alarm_ts ON alarm_transitions(alarm_id, timestamp)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS shift_handovers (
+                    handover_id TEXT PRIMARY KEY,
+                    shift_date TEXT NOT NULL,
+                    shift_name TEXT NOT NULL,
+                    shift_start TEXT NOT NULL,
+                    shift_end TEXT NOT NULL,
+                    outgoing_operator TEXT NOT NULL,
+                    incoming_operator TEXT,
+                    submitted_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING_RECEIPT',
+                    summary_json TEXT NOT NULL,
+                    entries_json TEXT NOT NULL,
+                    received_at TEXT,
+                    received_by TEXT,
+                    signature_name TEXT,
+                    face_to_face_confirmed INTEGER NOT NULL DEFAULT 0,
+                    walkthrough_confirmed INTEGER NOT NULL DEFAULT 0
+                );
+            """)
+            handover_columns = {row[1] for row in conn.execute("PRAGMA table_info(shift_handovers)")}
+            for column in ("face_to_face_confirmed", "walkthrough_confirmed"):
+                if column not in handover_columns:
+                    conn.execute(f"ALTER TABLE shift_handovers ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_shift_handovers_date ON shift_handovers(shift_date, submitted_at)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS handover_item_responses (
+                    response_id TEXT PRIMARY KEY,
+                    handover_id TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    operator TEXT NOT NULL,
+                    comment TEXT,
+                    acknowledged INTEGER NOT NULL DEFAULT 0,
+                    timestamp TEXT NOT NULL
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_handover_responses_item ON handover_item_responses(handover_id, item_id, timestamp)")
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_candidate_events_equip
                 ON candidate_events(equipment_id, trigger_timestamp);
@@ -679,10 +752,18 @@ class Database:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(alarm_id) DO UPDATE SET
                     repeat_count = excluded.repeat_count,
-                    lifecycle_state = excluded.lifecycle_state,
+                    lifecycle_state = CASE
+                        WHEN UPPER(individual_alarms.lifecycle_state) = 'ACKNOWLEDGED'
+                             AND UPPER(excluded.lifecycle_state) = 'ACTIVE'
+                        THEN individual_alarms.lifecycle_state
+                        ELSE excluded.lifecycle_state END,
                     last_seen_timestamp = excluded.last_seen_timestamp,
                     cleared_timestamp = excluded.cleared_timestamp,
-                    acknowledged_timestamp = excluded.acknowledged_timestamp,
+                    acknowledged_timestamp = CASE
+                        WHEN UPPER(individual_alarms.lifecycle_state) = 'ACKNOWLEDGED'
+                             AND UPPER(excluded.lifecycle_state) = 'ACTIVE'
+                        THEN individual_alarms.acknowledged_timestamp
+                        ELSE excluded.acknowledged_timestamp END,
                     value = excluded.value
                 """,
                 (
@@ -718,6 +799,228 @@ class Database:
             (incident_id,)
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    def get_all_individual_alarms(self) -> List[dict]:
+        conn = self._get_connection()
+        rows = conn.execute(
+            """SELECT alarm_id, incident_id, tag, equipment_id, alarm_type, value,
+                      threshold, source_priority, lifecycle_state, repeat_count,
+                      first_seen_timestamp, last_seen_timestamp, cleared_timestamp,
+                      acknowledged_timestamp, fingerprint, created_at
+               FROM individual_alarms ORDER BY first_seen_timestamp DESC"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_alarm_occurrence(self, incident_id: str, record, data_source: str = "unknown", data_quality: str = "UNKNOWN") -> None:
+        """Append a timestamped alarm activation without replacing prior occurrences."""
+        timestamp = record.last_seen_timestamp
+        conn = self._get_connection()
+        with conn:
+            conn.execute(
+                """INSERT INTO alarm_occurrences
+                   (occurrence_id, alarm_id, incident_id, occurred_at, value, lifecycle_state,
+                    data_source, data_quality, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (str(uuid.uuid4()), record.alarm_id, incident_id, timestamp, str(record.value),
+                 record.lifecycle_state, data_source or "unknown", data_quality or "UNKNOWN", current_iso_utc()),
+            )
+
+    def get_alarm_occurrences(self, alarm_id: str) -> List[dict]:
+        rows = self._get_connection().execute(
+            """SELECT occurrence_id, alarm_id, incident_id, occurred_at, value,
+                      lifecycle_state, data_source, data_quality
+               FROM alarm_occurrences WHERE alarm_id = ? ORDER BY occurred_at ASC""",
+            (alarm_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_alarm_transition(self, alarm_id: str, incident_id: str, state: str, operator: Optional[str], timestamp: str, notes: Optional[str] = None) -> None:
+        conn = self._get_connection()
+        with conn:
+            conn.execute(
+                """INSERT INTO alarm_transitions
+                   (transition_id, alarm_id, incident_id, state, operator, timestamp, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (str(uuid.uuid4()), alarm_id, incident_id, state, operator, timestamp, notes),
+            )
+
+    def record_alarm_acknowledgement(
+        self, event_id: str, alarm_id: str, operator: str,
+        notes: Optional[str] = None, timestamp: Optional[str] = None,
+    ) -> tuple[Optional[OperatorAction], bool]:
+        """Atomically persist one OpsLens acknowledgement without clearing an alarm.
+
+        Returns (action, created). Repeated acknowledgement requests for an
+        already acknowledged alarm are idempotent and do not create audit rows.
+        """
+        conn = self._get_connection()
+        ts = timestamp or current_iso_utc()
+        operator_name = operator.strip() if operator and operator.strip() else "anonymous"
+        operator_note = notes.strip() if notes and notes.strip() else "OpsLens operator acknowledgement; no PLC command issued."
+        clean_notes = f"Alarm ID: {alarm_id}. {operator_note}"
+        with conn:
+            event = conn.execute(
+                "SELECT 1 FROM event_stories WHERE event_id = ? LIMIT 1", (event_id,)
+            ).fetchone()
+            if not event:
+                raise ValueError(f"Event '{event_id}' not found.")
+            alarm = conn.execute(
+                "SELECT lifecycle_state FROM individual_alarms WHERE alarm_id = ? AND incident_id = ?",
+                (alarm_id, event_id),
+            ).fetchone()
+            if not alarm:
+                raise ValueError("The selected alarm is not linked to this incident.")
+            latest = conn.execute(
+                """SELECT state FROM alarm_transitions WHERE alarm_id = ?
+                   ORDER BY timestamp DESC, rowid DESC LIMIT 1""", (alarm_id,),
+            ).fetchone()
+            current_state = (latest["state"] if latest else alarm["lifecycle_state"] or "ACTIVE").upper()
+            if current_state == "ACKNOWLEDGED":
+                prior = conn.execute(
+                    """SELECT action_id, event_id, operator, action_type, timestamp, notes, created_at
+                       FROM operator_actions WHERE event_id = ? AND UPPER(action_type) IN ('ACKNOWLEDGE','ACKNOWLEDGED')
+                         AND notes LIKE ?
+                       ORDER BY julianday(timestamp) DESC, timestamp DESC, created_at DESC, rowid DESC LIMIT 1""",
+                    (event_id, f"Alarm ID: {alarm_id}.%"),
+                ).fetchone()
+                existing = OperatorAction(**dict(prior)) if prior else None
+                return existing, False
+            if current_state in ("CLEARED", "RETURNED_TO_NORMAL", "RESOLVED"):
+                raise ValueError("This alarm is no longer active and cannot be acknowledged.")
+
+            action = OperatorAction(
+                action_id=str(uuid.uuid4()), event_id=event_id, operator=operator_name,
+                action_type="ACKNOWLEDGE", timestamp=ts, notes=clean_notes,
+            )
+            conn.execute(
+                """INSERT INTO operator_actions
+                   (action_id, event_id, operator, action_type, timestamp, notes, created_at)
+                   VALUES (?, ?, ?, 'ACKNOWLEDGE', ?, ?, ?)""",
+                (action.action_id, event_id, operator_name, ts, clean_notes, current_iso_utc()),
+            )
+            conn.execute(
+                """INSERT INTO alarm_transitions
+                   (transition_id, alarm_id, incident_id, state, operator, timestamp, notes)
+                   VALUES (?, ?, ?, 'ACKNOWLEDGED', ?, ?, ?)""",
+                (str(uuid.uuid4()), alarm_id, event_id, operator_name, ts, clean_notes),
+            )
+            conn.execute(
+                """UPDATE individual_alarms SET lifecycle_state = 'ACKNOWLEDGED',
+                   acknowledged_timestamp = ? WHERE alarm_id = ? AND incident_id = ?""",
+                (ts, alarm_id, event_id),
+            )
+        return action, True
+
+    def get_alarm_transitions(self, alarm_id: str) -> List[dict]:
+        rows = self._get_connection().execute(
+            """SELECT transition_id, alarm_id, incident_id, state, operator, timestamp, notes
+               FROM alarm_transitions WHERE alarm_id = ? ORDER BY timestamp ASC, rowid ASC""",
+            (alarm_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_alarm_normal_reading(self, tag: str, timestamp: str, data_source: str = "unknown") -> int:
+        """Persist normal state transitions for alarm tags without resolving linked incidents."""
+        try:
+            normal = str(tag).upper().startswith("ALM-")
+            if not normal:
+                return 0
+            conn = self._get_connection()
+            rows = conn.execute(
+                """SELECT alarm_id, incident_id, last_seen_timestamp FROM individual_alarms
+                   WHERE tag = ? AND UPPER(lifecycle_state) NOT IN ('CLEARED', 'RETURNED_TO_NORMAL')""", (tag,)
+            ).fetchall()
+            count = 0
+            for row in rows:
+                if timestamp <= row["last_seen_timestamp"]:
+                    continue
+                self.record_alarm_transition(row["alarm_id"], row["incident_id"], "RETURNED_TO_NORMAL", "System telemetry", timestamp,
+                                             f"Alarm input returned to normal ({data_source or 'source unavailable'}); incident remains open.")
+                with conn:
+                    conn.execute(
+                        "UPDATE individual_alarms SET lifecycle_state='CLEARED', cleared_timestamp=? WHERE alarm_id=?",
+                        (timestamp, row["alarm_id"]),
+                    )
+                count += 1
+            return count
+        except Exception:
+            return 0
+
+    def save_shift_handover(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        conn = self._get_connection()
+        with conn:
+            conn.execute(
+                """INSERT INTO shift_handovers
+                   (handover_id, shift_date, shift_name, shift_start, shift_end, outgoing_operator,
+                    incoming_operator, submitted_at, status, summary_json, entries_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_RECEIPT', ?, ?)""",
+                (record["handover_id"], record["shift_date"], record["shift_name"], record["shift_start"],
+                 record["shift_end"], record["outgoing_operator"], record.get("incoming_operator"),
+                 record["submitted_at"], json.dumps(record["summary"], ensure_ascii=False),
+                 json.dumps(record["entries"], ensure_ascii=False)),
+            )
+        return record
+
+    def get_shift_handover(self, handover_id: str) -> Optional[dict]:
+        row = self._get_connection().execute("SELECT * FROM shift_handovers WHERE handover_id = ?", (handover_id,)).fetchone()
+        return self._deserialize_handover(row) if row else None
+
+    def list_shift_handovers(self, filters: Optional[Dict[str, str]] = None, limit: int = 100) -> List[dict]:
+        filters = filters or {}
+        clauses, params = [], []
+        for key, column in (("date", "shift_date"), ("shift", "shift_name"), ("operator", "outgoing_operator")):
+            value = filters.get(key)
+            if value:
+                clauses.append(f"{column} LIKE ?")
+                params.append(f"%{value}%")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._get_connection().execute(
+            f"SELECT * FROM shift_handovers {where} ORDER BY submitted_at DESC LIMIT ?", (*params, max(1, min(int(limit), 500)))
+        ).fetchall()
+        return [self._deserialize_handover(row) for row in rows]
+
+    @staticmethod
+    def _deserialize_handover(row) -> dict:
+        item = dict(row)
+        item["summary"] = json.loads(item.pop("summary_json") or "{}")
+        item["entries"] = json.loads(item.pop("entries_json") or "[]")
+        item["face_to_face_confirmed"] = bool(item.get("face_to_face_confirmed"))
+        item["walkthrough_confirmed"] = bool(item.get("walkthrough_confirmed"))
+        return item
+
+    def save_handover_item_response(self, handover_id: str, item_id: str, operator: str, comment: Optional[str], acknowledged: bool, timestamp: str) -> dict:
+        response = {"response_id": str(uuid.uuid4()), "handover_id": handover_id, "item_id": item_id,
+                    "operator": operator, "comment": comment, "acknowledged": bool(acknowledged), "timestamp": timestamp}
+        with self._get_connection() as conn:
+            conn.execute(
+                """INSERT INTO handover_item_responses
+                   (response_id, handover_id, item_id, operator, comment, acknowledged, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (response["response_id"], handover_id, item_id, operator, comment, int(acknowledged), timestamp),
+            )
+        return response
+
+    def get_handover_item_responses(self, handover_id: str) -> List[dict]:
+        rows = self._get_connection().execute(
+            """SELECT response_id, handover_id, item_id, operator, comment, acknowledged, timestamp
+               FROM handover_item_responses WHERE handover_id = ? ORDER BY timestamp, rowid""",
+            (handover_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def confirm_shift_handover(self, handover_id: str, incoming_operator: str, signature_name: str, timestamp: str,
+                               face_to_face_confirmed: bool, walkthrough_confirmed: bool) -> bool:
+        if not face_to_face_confirmed or not walkthrough_confirmed:
+            raise ValueError("Incoming receipt requires face-to-face handover and walk-through confirmation.")
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """UPDATE shift_handovers SET incoming_operator = ?, received_by = ?,
+                   signature_name = ?, received_at = ?, status = 'RECEIVED',
+                   face_to_face_confirmed = 1, walkthrough_confirmed = 1
+                   WHERE handover_id = ?""",
+                (incoming_operator, incoming_operator, signature_name, timestamp, handover_id),
+            )
+        return cursor.rowcount > 0
 
     def get_candidate_events(
         self,
@@ -1305,31 +1608,36 @@ class Database:
         return results
 
     def get_event_status(self, event_id: str) -> str:
-        """Return incident lifecycle status from its latest audited transition."""
+        """Return incident status; acknowledgement is a separate, non-closing state."""
         row = self._get_connection().execute(
             """
             SELECT UPPER(action_type) AS action_type
             FROM operator_actions
             WHERE event_id = ?
-              AND UPPER(action_type) IN ('RESOLVE', 'RESOLVED', 'ACKNOWLEDGE', 'ACKNOWLEDGED', 'MARK_UNRESOLVED')
+              AND UPPER(action_type) IN ('RESOLVE', 'RESOLVED', 'MARK_UNRESOLVED')
             ORDER BY julianday(timestamp) DESC, timestamp DESC, created_at DESC, rowid DESC
             LIMIT 1
             """,
             (event_id,),
         ).fetchone()
         action_type = row["action_type"] if row else None
-        return {
+        incident_status = {
             "RESOLVE": "RESOLVED",
             "RESOLVED": "RESOLVED",
-            "ACKNOWLEDGE": "ACKNOWLEDGED",
-            "ACKNOWLEDGED": "ACKNOWLEDGED",
             "MARK_UNRESOLVED": "UNRESOLVED",
-        }.get(action_type, "OPEN")
+        }.get(action_type)
+        if incident_status:
+            return incident_status
+        ack = self._get_connection().execute(
+            """SELECT 1 FROM operator_actions WHERE event_id = ?
+               AND UPPER(action_type) IN ('ACKNOWLEDGE', 'ACKNOWLEDGED') LIMIT 1""", (event_id,)
+        ).fetchone()
+        return "ACKNOWLEDGED" if ack else "OPEN"
 
     def get_open_event_ids(self) -> List[str]:
         """
-        Fetch event_ids whose latest audited lifecycle transition is not
-        RESOLVE or ACKNOWLEDGE. MARK_UNRESOLVED explicitly reopens the event.
+        Fetch event_ids that have not been resolved. Acknowledgement is a
+        separate operator state and never closes an incident.
         """
         conn = self._get_connection()
         query = """
@@ -1339,10 +1647,10 @@ class Database:
                 SELECT UPPER(oa.action_type)
                 FROM operator_actions oa
                 WHERE oa.event_id = event_stories.event_id
-                  AND UPPER(oa.action_type) IN ('RESOLVED', 'RESOLVE', 'ACKNOWLEDGED', 'ACKNOWLEDGE', 'MARK_UNRESOLVED')
+                  AND UPPER(oa.action_type) IN ('RESOLVED', 'RESOLVE', 'MARK_UNRESOLVED')
                 ORDER BY julianday(oa.timestamp) DESC, oa.timestamp DESC, oa.created_at DESC, oa.rowid DESC
                 LIMIT 1
-            ), '') NOT IN ('RESOLVED', 'RESOLVE', 'ACKNOWLEDGED', 'ACKNOWLEDGE')
+            ), '') NOT IN ('RESOLVED', 'RESOLVE')
             ORDER BY created_at ASC
         """
         cursor = conn.execute(query)
@@ -1415,7 +1723,13 @@ class Database:
         """
         Check whether an event has been resolved by an action of type RESOLVE or RESOLVED.
         """
-        return self.get_event_status(event_id) == "RESOLVED"
+        row = self._get_connection().execute(
+            """SELECT UPPER(action_type) AS action_type FROM operator_actions
+               WHERE event_id = ? AND UPPER(action_type) IN ('RESOLVE', 'RESOLVED', 'MARK_UNRESOLVED')
+               ORDER BY julianday(timestamp) DESC, timestamp DESC, created_at DESC, rowid DESC LIMIT 1""",
+            (event_id,),
+        ).fetchone()
+        return bool(row and row["action_type"] in ("RESOLVE", "RESOLVED"))
 
     def get_conversation_event_id(self, conversation_id: str) -> Optional[str]:
         conn = self._get_connection()

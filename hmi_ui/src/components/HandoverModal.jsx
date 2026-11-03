@@ -1,7 +1,7 @@
 import React from 'react';
 import { X, ClipboardCheck, User, Calendar, FileText, CheckCircle2, ShieldCheck, Printer } from 'lucide-react';
 
-export default function HandoverModal({ isOpen, onClose, handover, isIncident = false, unitName = 'Pump-02' }) {
+export default function HandoverModal({ isOpen, onClose, handover, unitName }) {
   if (!isOpen) return null;
 
   const data = handover || {};
@@ -10,10 +10,9 @@ export default function HandoverModal({ isOpen, onClose, handover, isIncident = 
   const openIssues = data.open_events || data.open_issues || [];
   const summaryText = data.summary_text || (eventsInWindow.length > 0
     ? `${eventsInWindow.length} event(s) logged during this shift (${openIssues.length} still active).`
-    : (data.incident || "Normal operational parameters maintained throughout the shift."));
+    : (data.incident || 'No event summary is available for this shift.'));
 
-  const latestEvent = eventsInWindow.length > 0 ? (typeof eventsInWindow[eventsInWindow.length - 1] === 'object' ? eventsInWindow[eventsInWindow.length - 1] : { primary_tag: eventsInWindow[eventsInWindow.length - 1] }) : null;
-  const operatorSignOff = data.operator || (actionsInWindow.length > 0 ? actionsInWindow[actionsInWindow.length - 1].operator_id : "J. Rivera (Shift 2)");
+  const operatorSignOff = data.operator || (actionsInWindow.length > 0 ? actionsInWindow[actionsInWindow.length - 1].operator_id : 'Not recorded');
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
@@ -30,7 +29,7 @@ export default function HandoverModal({ isOpen, onClose, handover, isIncident = 
                 Shift handover
               </h3>
               <span className="text-xs text-[#64736A] font-mono-code">
-                {unitName || data.unit || 'Selected equipment'}
+                {unitName || data.unit || 'Equipment not recorded'}
               </span>
             </div>
           </div>
@@ -50,11 +49,11 @@ export default function HandoverModal({ isOpen, onClose, handover, isIncident = 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 bg-[#F3F6F3] p-3.5 rounded-lg border border-[#D8E2DA] text-xs font-mono-code">
             <div>
               <span className="text-[#64736A] block">EQUIPMENT</span>
-              <strong className="text-[#26352C]">{unitName || data.unit || 'Pump-02'}</strong>
+              <strong className="text-[#26352C]">{unitName || data.unit || 'Not recorded'}</strong>
             </div>
             <div>
               <span className="text-[#64736A] block">SHIFT</span>
-              <strong className="text-[#26352C]">{data.shift || 'Shift 2 (Live)'}</strong>
+              <strong className="text-[#26352C]">{data.shift || 'Not recorded'}</strong>
             </div>
             <div>
               <span className="text-[#64736A] block">OPERATOR</span>
@@ -62,7 +61,7 @@ export default function HandoverModal({ isOpen, onClose, handover, isIncident = 
             </div>
             <div>
               <span className="text-[#64736A] block">STATUS</span>
-              <span className={`font-bold ${openIssues.length > 0 ? 'text-[#D92D20]' : 'text-[#009530]'}`}>{openIssues.length > 0 ? 'ATTN REQUIRED' : 'READY'}</span>
+              <span className={`font-bold ${openIssues.length > 0 ? 'text-[#D92D20]' : 'text-[#64736A]'}`}>{openIssues.length > 0 ? 'ATTN REQUIRED' : (data.status || 'Unavailable')}</span>
             </div>
           </div>
 
@@ -106,7 +105,7 @@ export default function HandoverModal({ isOpen, onClose, handover, isIncident = 
               </div>
             ) : (
               <div className="bg-[#F3F6F3] rounded-lg p-3 border border-[#D8E2DA] text-xs text-[#64736A] italic">
-                No critical excursions logged in current shift window.
+                No event records are available for the selected shift window.
               </div>
             )}
           </div>

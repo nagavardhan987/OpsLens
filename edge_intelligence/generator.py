@@ -131,9 +131,10 @@ class SyntheticDataGenerator:
 
         # 2. Query scenario state machine if active
         overrides: Dict[str, Any] = {}
+        scenario_elapsed = self.scenario_elapsed
         if self.current_scenario is not None:
             overrides = self.current_scenario.get_tag_values(
-                self.scenario_elapsed,
+                scenario_elapsed,
                 nominal_values
             )
             self.scenario_elapsed += self.sample_interval
@@ -144,6 +145,8 @@ class SyntheticDataGenerator:
 
         for tag_name in get_all_tags():
             entry = TAG_REGISTRY[tag_name]
+            metadata = (self.current_scenario.get_reading_metadata(tag_name, scenario_elapsed)
+                        if self.current_scenario is not None else {})
 
             if tag_name in overrides:
                 val = overrides[tag_name]
@@ -154,15 +157,17 @@ class SyntheticDataGenerator:
             else:
                 val = "NORMAL"
 
+            reading_time = self.sim_clock - timedelta(seconds=float(metadata.get("stale_by_seconds", 0.0)))
             reading = TagReading(
                 tag=tag_name,
                 value=val,
-                timestamp=ts_str,
+                timestamp=to_iso_utc(reading_time),
                 unit=entry.unit,
                 equipment_id=entry.equipment_id,
-                data_quality="VALID",
+                received_timestamp=ts_str,
+                data_quality=metadata.get("data_quality", "VALID"),
                 data_source="simulated",
-                connection_status="simulation",
+                connection_status=metadata.get("connection_status", "simulation"),
             )
             readings.append(reading)
 

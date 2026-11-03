@@ -19,7 +19,7 @@ test('response status never calls deterministic output AI generated', () => {
   assert.equal(assistantDisplayStatus({ llm_used: true, fallback_used: true }).tone, 'evidence');
   assert.equal(assistantDisplayStatus({ llm_used: false, fallback_used: true, fallback_reason: 'ungrounded_numeric_value' }).text,
     'Evidence-based answer');
-  assert.equal(assistantDisplayStatus({ llm_used: true, fallback_used: false }).text, 'AI-generated');
+  assert.equal(assistantDisplayStatus({ llm_used: true, fallback_used: false }).text, 'AI-generated answer');
 });
 
 test('fallback notice distinguishes provider errors from grounding rejection', () => {
@@ -74,7 +74,7 @@ test('only resolved SOP steps with meaningful stored content are shown as refere
     selected_provider: 'Groq',
     uncertainty_status: 'insufficient_approved_procedure',
   });
-  assert.equal(ungroundedStatus.text, 'AI-generated');
+  assert.equal(ungroundedStatus.text, 'AI-generated answer');
   assert.doesNotMatch(ungroundedStatus.text, /Groq|grounded via/i);
 });
 

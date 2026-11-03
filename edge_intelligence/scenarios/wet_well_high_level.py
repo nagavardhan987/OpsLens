@@ -13,13 +13,15 @@ class WetWellHighLevelScenario(BaseScenario):
             scenario_id="wet_well_high_level",
             name="Lift Station — Wet-Well High-High Level",
             description=(
-                "Synthetic lift-station event: discharge flow and pressure fall, "
-                "wet-well level rises, and the high-high level input annunciates."
+                "SIMULATED lift-station sequence: pump flow and discharge pressure fall, "
+                "wet-well level rises, and a pump fault and high-high alarm are recorded. "
+                "This correlation does not confirm a physical cause."
             ),
             duration_seconds=80.0,
             target_equipment="LiftStation-01",
             expected_correlations=[
-                "FIT-101-DIS", "PIT-101-DIS", "MOT-101-CUR", "LIT-101-WWL", "ALM-WW-101-HH",
+                "FIT-101-DIS", "FIT-101-P1-FLW", "PIT-101-DIS", "MOT-101-CUR",
+                "P101-RUN", "P101-FAULT", "LIT-101-WWL", "ALM-WW-101-HH",
             ],
             expected_non_correlations=[
                 "DPT-110-SCR", "AIT-201-DO", "AIT-201-NH4", "ALM-SCR-110-DP",
@@ -33,9 +35,10 @@ class WetWellHighLevelScenario(BaseScenario):
         # loss of lift discharge is represented by about 950 m³/h at plateau.
         schedules = (
             ("FIT-101-DIS", 8.0, 42.0, 950.0, 2025.0),
-            ("PIT-101-DIS", 8.0, 40.0, 1.25, 2.4),
-            ("MOT-101-CUR", 12.0, 42.0, 66.0, 92.5),
-            ("LIT-101-WWL", 10.0, 50.0, 91.0, 47.5),
+            ("FIT-101-P1-FLW", 8.0, 42.0, 230.0, 420.0),
+            ("PIT-101-DIS", 8.0, 40.0, 1.7, 3.1),
+            ("MOT-101-CUR", 12.0, 42.0, 44.0, 31.0),
+            ("LIT-101-WWL", 10.0, 50.0, 3.8, 2.2),
         )
         for tag, start, end, target, nominal in schedules:
             if t < start:
@@ -45,5 +48,9 @@ class WetWellHighLevelScenario(BaseScenario):
             values[tag] = round(self.smooth_transition(initial, target, p), 2)
 
         level = values.get("LIT-101-WWL", nominal_values.get("LIT-101-WWL", 47.5))
-        values["ALM-WW-101-HH"] = level >= 85.0
+        values["P101-RUN"] = t < 48.0
+        values["P101-FAULT"] = t >= 48.0
+        if t >= 48.0:
+            values["MOT-101-CUR"] = 0.0
+        values["ALM-WW-101-HH"] = level >= 3.6
         return values

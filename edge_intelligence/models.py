@@ -276,6 +276,7 @@ class SopMatch(BaseModel):
     rag_trace: Optional[Dict[str, Any]] = None                # full audit record
     # Retrieval outcome is independent of the incident-analysis result.
     retrieval_status: str = "match_found"  # match_found | no_match | unavailable
+    retrieval_state: Optional[str] = None  # MATCH_FOUND | NO_MATCH | RETRIEVAL_UNAVAILABLE
     retrieval_error: Optional[str] = None   # sanitized reason code only
 
 
@@ -317,6 +318,18 @@ class HandoverSummary(BaseModel):
     events: List[str] = Field(default_factory=list)
     actions: List[OperatorAction] = Field(default_factory=list)
     open_events: List[str] = Field(default_factory=list)
+    open_alarms: List[Dict[str, Any]] = Field(default_factory=list)
+    unacknowledged_alarms: List[Dict[str, Any]] = Field(default_factory=list)
+    unresolved_incidents: List[Dict[str, Any]] = Field(default_factory=list)
+    equipment_out_of_service: Dict[str, Any] = Field(default_factory=dict)
+    active_permits: Dict[str, Any] = Field(default_factory=dict)
+    loto_status: Dict[str, Any] = Field(default_factory=dict)
+    process_changes: Dict[str, Any] = Field(default_factory=dict)
+    abnormal_sensor_readings: Dict[str, Any] = Field(default_factory=dict)
+    chemical_and_polymer_stock: Dict[str, Any] = Field(default_factory=dict)
+    pending_laboratory_results: Dict[str, Any] = Field(default_factory=dict)
+    pending_maintenance: Dict[str, Any] = Field(default_factory=dict)
+    outstanding_operator_actions: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ContextWindow(BaseModel):

@@ -22,7 +22,7 @@ export default function RelevantSop({ sopData, onOpenSopModal, isIncident = fals
     return (
       <div className="flex items-center gap-3 rounded-lg border border-[#d8e3da] bg-white px-4 py-3">
         <BookOpen className="h-4 w-4 shrink-0 text-slate-500" />
-        <span className="text-xs text-slate-600">{resolution.status === 'retrieval_unavailable' ? 'Procedure reference unavailable.' : 'No approved procedure found for this incident.'}</span>
+        <span className="text-xs text-slate-600">{resolution.message || (resolution.status === 'retrieval_unavailable' ? 'Procedure reference unavailable.' : 'No approved procedure found for this incident.')}</span>
       </div>
     );
   }

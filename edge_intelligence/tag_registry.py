@@ -94,6 +94,11 @@ TAG_REGISTRY: Dict[str, TagRegistryEntry] = {
         topology_upstream=[],
         short_label="Compressor speed excursion",
     ),
+    "CMP-01-RUN": TagRegistryEntry(
+        tag="CMP-01-RUN", equipment_id="Compressor-01", unit="status", data_type="bool",
+        baseline_min=0.0, baseline_max=0.0, trip_threshold=None, severity_weight=0.3,
+        topology_upstream=[], short_label="Compressor operating status",
+    ),
     "CMP-01-VIB": TagRegistryEntry(
         tag="CMP-01-VIB",
         equipment_id="Compressor-01",
@@ -166,9 +171,9 @@ TAG_REGISTRY: Dict[str, TagRegistryEntry] = {
     # site design, permits, and approved alarm rationalization before use.
     # -------------------------------------------------------------------------
     "LIT-101-WWL": TagRegistryEntry(
-        tag="LIT-101-WWL", equipment_id="LiftStation-01", unit="%",
-        data_type="float", baseline_min=35.0, baseline_max=60.0,
-        trip_threshold=85.0, severity_weight=0.88,
+        tag="LIT-101-WWL", equipment_id="LiftStation-01", unit="m",
+        data_type="float", baseline_min=1.0, baseline_max=2.4,
+        trip_threshold=3.6, severity_weight=0.88,
         topology_upstream=["FIT-101-DIS"], short_label="Wet-well level rise",
     ),
     "FIT-101-DIS": TagRegistryEntry(
@@ -186,8 +191,8 @@ TAG_REGISTRY: Dict[str, TagRegistryEntry] = {
     ),
     "MOT-101-CUR": TagRegistryEntry(
         tag="MOT-101-CUR", equipment_id="LiftStation-01", unit="A",
-        data_type="float", baseline_min=75.0, baseline_max=110.0,
-        trip_threshold=145.0, severity_weight=0.38,
+        data_type="float", baseline_min=28.0, baseline_max=34.0,
+        trip_threshold=42.0, severity_weight=0.38,
         topology_upstream=[], short_label="Lift pump motor current",
     ),
     "ALM-WW-101-HH": TagRegistryEntry(
@@ -195,6 +200,21 @@ TAG_REGISTRY: Dict[str, TagRegistryEntry] = {
         data_type="bool", baseline_min=0.0, baseline_max=0.0,
         trip_threshold=1.0, severity_weight=1.0,
         topology_upstream=["LIT-101-WWL"], short_label="Wet-well high-high level",
+    ),
+    "P101-RUN": TagRegistryEntry(
+        tag="P101-RUN", equipment_id="LiftStation-01", unit="status", data_type="bool",
+        baseline_min=0.0, baseline_max=0.0, trip_threshold=None, severity_weight=0.35,
+        topology_upstream=[], short_label="Lift pump P-101 running",
+    ),
+    "P101-FAULT": TagRegistryEntry(
+        tag="P101-FAULT", equipment_id="LiftStation-01", unit="status", data_type="bool",
+        baseline_min=0.0, baseline_max=0.0, trip_threshold=1.0, severity_weight=0.85,
+        topology_upstream=[], short_label="Lift pump P-101 fault",
+    ),
+    "FIT-101-P1-FLW": TagRegistryEntry(
+        tag="FIT-101-P1-FLW", equipment_id="LiftStation-01", unit="m³/h", data_type="float",
+        baseline_min=350.0, baseline_max=450.0, trip_threshold=300.0, severity_weight=0.78,
+        topology_upstream=["P101-RUN"], short_label="Lift pump P-101 flow",
     ),
     "FIT-110-IN": TagRegistryEntry(
         tag="FIT-110-IN", equipment_id="InletWorks-01", unit="m³/h",
@@ -213,6 +233,16 @@ TAG_REGISTRY: Dict[str, TagRegistryEntry] = {
         data_type="bool", baseline_min=0.0, baseline_max=0.0,
         trip_threshold=1.0, severity_weight=0.88,
         topology_upstream=["DPT-110-SCR"], short_label="Coarse screen differential pressure high",
+    ),
+    "SCR-110-RAKE-RUN": TagRegistryEntry(
+        tag="SCR-110-RAKE-RUN", equipment_id="InletWorks-01", unit="status", data_type="bool",
+        baseline_min=0.0, baseline_max=0.0, trip_threshold=None, severity_weight=0.4,
+        topology_upstream=[], short_label="Screen rake running",
+    ),
+    "SCR-110-MOT-CUR": TagRegistryEntry(
+        tag="SCR-110-MOT-CUR", equipment_id="InletWorks-01", unit="A", data_type="float",
+        baseline_min=6.0, baseline_max=9.0, trip_threshold=14.0, severity_weight=0.6,
+        topology_upstream=["SCR-110-RAKE-RUN"], short_label="Screen rake motor current",
     ),
     "AIT-201-DO": TagRegistryEntry(
         tag="AIT-201-DO", equipment_id="AerationBasin-01", unit="mg/L",
@@ -238,7 +268,62 @@ TAG_REGISTRY: Dict[str, TagRegistryEntry] = {
         trip_threshold=1.0, severity_weight=0.90,
         topology_upstream=["AIT-201-NH4"], short_label="Ammonia high alarm",
     ),
-
+    "RAS-P1-RUN": TagRegistryEntry(
+        tag="RAS-P1-RUN", equipment_id="RASSystem-01", unit="status", data_type="bool",
+        baseline_min=0.0, baseline_max=0.0, trip_threshold=None, severity_weight=0.5,
+        topology_upstream=[], short_label="RAS pump P1 running",
+    ),
+    "RAS-FLOW": TagRegistryEntry(
+        tag="RAS-FLOW", equipment_id="RASSystem-01", unit="m³/h", data_type="float",
+        baseline_min=700.0, baseline_max=840.0, trip_threshold=550.0, severity_weight=0.82,
+        topology_upstream=["RAS-P1-RUN"], short_label="Total return activated sludge flow",
+    ),
+    "RAS-P1-CUR": TagRegistryEntry(
+        tag="RAS-P1-CUR", equipment_id="RASSystem-01", unit="A", data_type="float",
+        baseline_min=18.0, baseline_max=26.0, trip_threshold=0.5, severity_weight=0.62,
+        topology_upstream=["RAS-P1-RUN"], short_label="RAS pump P1 motor current",
+    ),
+    "SLB-201-DEPTH": TagRegistryEntry(
+        tag="SLB-201-DEPTH", equipment_id="SecondaryClarifier-01", unit="m", data_type="float",
+        baseline_min=0.3, baseline_max=0.8, trip_threshold=1.5, severity_weight=0.86,
+        topology_upstream=["RAS-FLOW"], short_label="Sludge blanket depth",
+    ),
+    "ALM-RAS-P1-FAIL": TagRegistryEntry(
+        tag="ALM-RAS-P1-FAIL", equipment_id="RASSystem-01", unit="status", data_type="bool",
+        baseline_min=0.0, baseline_max=0.0, trip_threshold=1.0, severity_weight=0.9,
+        topology_upstream=["RAS-P1-RUN", "RAS-P1-CUR"], short_label="RAS pump P1 failure alarm",
+    ),
+    "ALM-SLB-201-HIGH": TagRegistryEntry(
+        tag="ALM-SLB-201-HIGH", equipment_id="SecondaryClarifier-01", unit="status", data_type="bool",
+        baseline_min=0.0, baseline_max=0.0, trip_threshold=1.0, severity_weight=0.95,
+        topology_upstream=["SLB-201-DEPTH"], short_label="Sludge blanket high alarm",
+    ),
+    "FLT-401-PRI-NTU": TagRegistryEntry(
+        tag="FLT-401-PRI-NTU", equipment_id="Filter-01", unit="NTU", data_type="float",
+        baseline_min=0.5, baseline_max=2.0, trip_threshold=5.0, severity_weight=0.7,
+        topology_upstream=[], short_label="Filter primary turbidity sensor",
+    ),
+    "FLT-401-RED-NTU": TagRegistryEntry(
+        tag="FLT-401-RED-NTU", equipment_id="Filter-01", unit="NTU", data_type="float",
+        baseline_min=0.5, baseline_max=2.0, trip_threshold=None, severity_weight=0.35,
+        topology_upstream=["FLT-401-PRI-NTU"], short_label="Filter redundant turbidity sensor",
+    ),
+    "FLT-401-PRI-QUALITY": TagRegistryEntry(
+        tag="FLT-401-PRI-QUALITY", equipment_id="Filter-01", unit="status", data_type="string",
+        baseline_min=0.0, baseline_max=0.0, baseline_status="GOOD", trip_threshold=None,
+        severity_weight=0.5, topology_upstream=["FLT-401-PRI-NTU"], short_label="Primary sensor signal quality",
+    ),
+    "FLT-401-PRI-COMMS": TagRegistryEntry(
+        tag="FLT-401-PRI-COMMS", equipment_id="Filter-01", unit="status", data_type="string",
+        baseline_min=0.0, baseline_max=0.0, baseline_status="CONNECTED", trip_threshold=None,
+        severity_weight=0.5, topology_upstream=["FLT-401-PRI-NTU"], short_label="Primary sensor communication status",
+    ),
+    "ALM-FLT-401-SENSOR": TagRegistryEntry(
+        tag="ALM-FLT-401-SENSOR", equipment_id="Filter-01", unit="status", data_type="bool",
+        baseline_min=0.0, baseline_max=0.0, trip_threshold=1.0, severity_weight=0.75,
+        topology_upstream=["FLT-401-PRI-NTU", "FLT-401-RED-NTU", "FLT-401-PRI-QUALITY", "FLT-401-PRI-COMMS"],
+        short_label="Filter primary sensor fault alarm",
+    ),
     # Scenario 7 tertiary filtration / UV data. These are illustrative demo
     # ranges, not configured site limits; all generator outputs are simulated.
     "BWP-1-TRIP": TagRegistryEntry(
@@ -327,6 +412,31 @@ TAG_REGISTRY: Dict[str, TagRegistryEntry] = {
         trip_threshold=None, severity_weight=0.55,
         topology_upstream=["UV-501-DOSE"], short_label="Simulated lab coliform result",
     ),
+    "AER-201-FOAM-DEPTH": TagRegistryEntry(tag="AER-201-FOAM-DEPTH", equipment_id="AerationBasin-01", unit="cm", data_type="float", baseline_min=0.0, baseline_max=5.0, trip_threshold=15.0, severity_weight=0.9, topology_upstream=[], short_label="Aeration foam depth"),
+    "AER-201-MLSS": TagRegistryEntry(tag="AER-201-MLSS", equipment_id="AerationBasin-01", unit="mg/L", data_type="float", baseline_min=2500.0, baseline_max=3500.0, trip_threshold=None, severity_weight=0.45, topology_upstream=[], short_label="Mixed liquor suspended solids"),
+    "AER-201-SLUDGE-AGE": TagRegistryEntry(tag="AER-201-SLUDGE-AGE", equipment_id="AerationBasin-01", unit="days", data_type="float", baseline_min=8.0, baseline_max=15.0, trip_threshold=None, severity_weight=0.4, topology_upstream=["AER-201-MLSS"], short_label="Sludge age"),
+    "AER-201-WAS-FLOW": TagRegistryEntry(tag="AER-201-WAS-FLOW", equipment_id="AerationBasin-01", unit="m³/h", data_type="float", baseline_min=25.0, baseline_max=35.0, trip_threshold=None, severity_weight=0.35, topology_upstream=["AER-201-MLSS"], short_label="Waste activated sludge flow"),
+    "AER-201-EFF-TURB": TagRegistryEntry(tag="AER-201-EFF-TURB", equipment_id="AerationBasin-01", unit="NTU", data_type="float", baseline_min=1.0, baseline_max=4.0, trip_threshold=8.0, severity_weight=0.65, topology_upstream=["AER-201-FOAM-DEPTH"], short_label="Effluent turbidity"),
+    "ALM-AER-201-FOAM": TagRegistryEntry(tag="ALM-AER-201-FOAM", equipment_id="AerationBasin-01", unit="status", data_type="bool", baseline_min=0.0, baseline_max=0.0, trip_threshold=1.0, severity_weight=1.0, topology_upstream=["AER-201-FOAM-DEPTH"], short_label="Biological foam high alarm"),
+    "GAS-601-PRESS": TagRegistryEntry(tag="GAS-601-PRESS", equipment_id="BiogasSystem-01", unit="mbar", data_type="float", baseline_min=15.0, baseline_max=25.0, trip_threshold=35.0, severity_weight=0.95, topology_upstream=[], short_label="Biogas holder pressure"),
+    "GAS-601-FILL": TagRegistryEntry(tag="GAS-601-FILL", equipment_id="BiogasSystem-01", unit="%", data_type="float", baseline_min=30.0, baseline_max=70.0, trip_threshold=90.0, severity_weight=0.7, topology_upstream=["GAS-601-PRESS"], short_label="Biogas holder fill level"),
+    "CHP-601-RUN": TagRegistryEntry(tag="CHP-601-RUN", equipment_id="BiogasSystem-01", unit="status", data_type="bool", baseline_min=0.0, baseline_max=1.0, trip_threshold=None, severity_weight=0.65, topology_upstream=[], short_label="CHP operating state"),
+    "FLR-601-RUN": TagRegistryEntry(tag="FLR-601-RUN", equipment_id="BiogasSystem-01", unit="status", data_type="bool", baseline_min=0.0, baseline_max=1.0, trip_threshold=None, severity_weight=0.65, topology_upstream=["GAS-601-PRESS"], short_label="Flare status"),
+    "GAS-601-H2S": TagRegistryEntry(tag="GAS-601-H2S", equipment_id="BiogasSystem-01", unit="ppm", data_type="float", baseline_min=0.0, baseline_max=5.0, trip_threshold=10.0, severity_weight=0.9, topology_upstream=[], short_label="Biogas area gas detector"),
+    "GAS-601-FLOW": TagRegistryEntry(tag="GAS-601-FLOW", equipment_id="BiogasSystem-01", unit="Nm³/h", data_type="float", baseline_min=250.0, baseline_max=350.0, trip_threshold=None, severity_weight=0.45, topology_upstream=["CHP-601-RUN"], short_label="Biogas flow"),
+    "ALM-GAS-601-HIGH": TagRegistryEntry(tag="ALM-GAS-601-HIGH", equipment_id="BiogasSystem-01", unit="status", data_type="bool", baseline_min=0.0, baseline_max=0.0, trip_threshold=1.0, severity_weight=1.0, topology_upstream=["GAS-601-PRESS", "GAS-601-FILL"], short_label="Biogas holder high pressure alarm"),
+    "SLD-701-BOWL-RPM": TagRegistryEntry(tag="SLD-701-BOWL-RPM", equipment_id="DewateringCentrifuge-01", unit="rpm", data_type="float", baseline_min=3150.0, baseline_max=3250.0, trip_threshold=None, severity_weight=0.4, topology_upstream=[], short_label="Centrifuge bowl speed"),
+    "SLD-701-POLYMER": TagRegistryEntry(tag="SLD-701-POLYMER", equipment_id="DewateringCentrifuge-01", unit="L/h", data_type="float", baseline_min=35.0, baseline_max=45.0, trip_threshold=None, severity_weight=0.4, topology_upstream=[], short_label="Polymer dose"),
+    "SLD-701-CAPTURE": TagRegistryEntry(tag="SLD-701-CAPTURE", equipment_id="DewateringCentrifuge-01", unit="%", data_type="float", baseline_min=90.0, baseline_max=97.0, trip_threshold=80.0, severity_weight=0.9, topology_upstream=["SLD-701-BOWL-RPM", "SLD-701-POLYMER"], short_label="Solids capture"),
+    "SLD-701-CAKE-DRY": TagRegistryEntry(tag="SLD-701-CAKE-DRY", equipment_id="DewateringCentrifuge-01", unit="%", data_type="float", baseline_min=20.0, baseline_max=25.0, trip_threshold=None, severity_weight=0.55, topology_upstream=["SLD-701-CAPTURE"], short_label="Cake dryness"),
+    "SLD-701-CENTRATE-NH4": TagRegistryEntry(tag="SLD-701-CENTRATE-NH4", equipment_id="DewateringCentrifuge-01", unit="mg/L", data_type="float", baseline_min=20.0, baseline_max=50.0, trip_threshold=100.0, severity_weight=0.7, topology_upstream=["SLD-701-CAPTURE"], short_label="Centrate ammonia"),
+    "SLD-701-INLET-NH4": TagRegistryEntry(tag="SLD-701-INLET-NH4", equipment_id="DewateringCentrifuge-01", unit="mg/L", data_type="float", baseline_min=20.0, baseline_max=50.0, trip_threshold=None, severity_weight=0.35, topology_upstream=[], short_label="Plant inlet ammonia"),
+    "ALM-SLD-701-CAPTURE": TagRegistryEntry(tag="ALM-SLD-701-CAPTURE", equipment_id="DewateringCentrifuge-01", unit="status", data_type="bool", baseline_min=0.0, baseline_max=0.0, trip_threshold=1.0, severity_weight=1.0, topology_upstream=["SLD-701-CAPTURE", "SLD-701-CENTRATE-NH4"], short_label="Centrifuge low capture alarm"),
+    "LAB-901-SAMPLE-DUE": TagRegistryEntry(tag="LAB-901-SAMPLE-DUE", equipment_id="ProcessMonitoring-01", unit="status", data_type="bool", baseline_min=0.0, baseline_max=0.0, trip_threshold=1.0, severity_weight=0.8, topology_upstream=[], short_label="Process sample overdue flag"),
+    "LAB-901-RESULT-PENDING": TagRegistryEntry(tag="LAB-901-RESULT-PENDING", equipment_id="ProcessMonitoring-01", unit="status", data_type="bool", baseline_min=0.0, baseline_max=0.0, trip_threshold=1.0, severity_weight=0.6, topology_upstream=["LAB-901-SAMPLE-DUE"], short_label="Laboratory result pending"),
+    "LAB-901-CAL-DUE": TagRegistryEntry(tag="LAB-901-CAL-DUE", equipment_id="ProcessMonitoring-01", unit="status", data_type="bool", baseline_min=0.0, baseline_max=0.0, trip_threshold=1.0, severity_weight=0.7, topology_upstream=[], short_label="Online instrument calibration due"),
+    "LAB-901-MEAS-QUALITY": TagRegistryEntry(tag="LAB-901-MEAS-QUALITY", equipment_id="ProcessMonitoring-01", unit="status", data_type="string", baseline_min=0.0, baseline_max=0.0, baseline_status="GOOD", trip_threshold=None, severity_weight=0.55, topology_upstream=["LAB-901-CAL-DUE"], short_label="Instrument measurement quality"),
+    "ALM-LAB-901-DUE": TagRegistryEntry(tag="ALM-LAB-901-DUE", equipment_id="ProcessMonitoring-01", unit="status", data_type="bool", baseline_min=0.0, baseline_max=0.0, trip_threshold=1.0, severity_weight=0.9, topology_upstream=["LAB-901-SAMPLE-DUE", "LAB-901-RESULT-PENDING", "LAB-901-CAL-DUE"], short_label="Sampling and calibration monitoring due alarm"),
 }
 
 

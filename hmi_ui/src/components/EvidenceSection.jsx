@@ -23,13 +23,15 @@ export default function EvidenceSection({ evidence, evidenceAudit, event, isInci
     );
   }
 
-  const contributor = evidence?.likely_contributor_tag || evidence?.likely_contributor || '—';
   const scoring = evidenceAudit?.scoring_breakdown || {};
   const tagScores = scoring.tag_scores || {};
   const deltas = evidence?.supporting_deltas || [];
   const storySteps = event?.story?.steps || [];
   const eventSource = event?.runtime_alarm_state?.data_source || event?.runtime_alarm_state?.source || event?.data_source || event?.source;
-  const tags = [...new Set([...deltas.map((item) => item.tag), ...Object.keys(tagScores)])].filter(Boolean);
+  const primaryTag = event?.candidate?.primary_tag || event?.primary_tag;
+  const tags = [...new Set([...deltas.map((item) => item.tag), ...Object.keys(tagScores)])].filter((tag) => tag && tag !== primaryTag);
+  const hasSupportingEvidence = tags.length >= 2;
+  const contributor = hasSupportingEvidence ? (evidence?.likely_contributor_tag || evidence?.likely_contributor || '—') : 'No clear contributing factor identified.';
   const rows = tags.map((tag) => {
     const delta = deltas.find((item) => item.tag === tag) || {};
     const score = tagScores[tag] || {};
@@ -47,7 +49,7 @@ export default function EvidenceSection({ evidence, evidenceAudit, event, isInci
   return (
     <div className="evidence-section space-y-3">
       {/* Likely contributor — prominent */}
-      <div className="rounded-xl border border-[#D8E2DA] bg-white px-4 py-3 shadow-sm">
+      {hasSupportingEvidence && <div className="rounded-xl border border-[#D8E2DA] bg-white px-4 py-3 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
             <div className="text-[10px] uppercase tracking-wider text-[#B7791F] mb-0.5 font-bold">Possible contributor</div>
@@ -62,7 +64,9 @@ export default function EvidenceSection({ evidence, evidenceAudit, event, isInci
         </div>
 
         <p className="mt-2 text-[10px] text-[#64736A]">A temporal or ranked relationship is a possible contributor, not confirmation of physical causation.</p>
-      </div>
+      </div>}
+
+      {!hasSupportingEvidence && <div className="rounded-xl border border-[#D8E2DA] bg-white px-4 py-3 text-sm text-[#64736A]"><strong className="text-[#26352C]">No clear contributing factor identified.</strong> The recorded alarm is available, but supporting correlated readings are insufficient to rank a possible contributor.</div>}
 
       <section className="evidence-table-panel" aria-label="Ranked evidence readings">
         <div className="evidence-coverage" role="status">Evidence coverage: {rows.length ? `${rows.length} ranked signal${rows.length === 1 ? '' : 's'} listed` : 'No ranked signals available'} · {missingData} row{missingData === 1 ? '' : 's'} missing a prior value, current value, or source record. Coverage describes data availability, not probability of root cause.</div>
@@ -74,7 +78,7 @@ export default function EvidenceSection({ evidence, evidenceAudit, event, isInci
             <td>{row.abs == null ? '—' : `${row.abs > 0 ? '+' : ''}${formatValue(row.abs, row.observed.unit || '')}`}</td>
             <td>{typeof row.delta.delta_pct === 'number' ? `${row.delta.delta_pct > 0 ? '+' : ''}${row.delta.delta_pct.toFixed(1)}%` : '—'}</td>
             <td>{row.relevance}</td><td>{sourceLabel(row.source)} · {row.observed.quality || row.observed.quality_status || 'quality not recorded'}</td>
-            <td><span className="evidence-possible">Possible contributor</span></td>
+            <td><span className={hasSupportingEvidence ? 'evidence-possible' : 'evidence-observed'}>{hasSupportingEvidence ? 'Possible contributor' : 'Recorded signal'}</span></td>
           </tr>)}</tbody>
         </table></div> : <p className="evidence-empty">No ranked supporting readings are available for this incident. Check related tags and source timestamps in the event record.</p>}
       </section>

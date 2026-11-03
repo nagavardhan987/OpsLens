@@ -49,6 +49,7 @@ export default function SopLibrary() {
   const [file, setFile] = useState(null);
   const [metadata, setMetadata] = useState(initialMetadata);
   const [documents, setDocuments] = useState([]);
+  const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
@@ -147,6 +148,7 @@ export default function SopLibrary() {
 
   const resultTitle = result?.status === 'duplicate' ? 'This document is already in the library' : result?.status === 'partial_extraction' ? 'Added for review · text may be incomplete' : result?.status === 'indexed' ? 'Reference added' : 'Document status';
   const resultTone = result?.status === 'indexed' ? 'border-[#009530]/30 bg-[#E8F5EC]' : 'border-[#B7791F]/30 bg-[#FFF8E8]';
+  const visibleDocuments = documents.filter((doc) => `${doc.sop_id} ${doc.title} ${doc.equipment} ${doc.process_area}`.toLowerCase().includes(search.trim().toLowerCase()));
 
   return <main className="flex-1 w-full max-w-6xl mx-auto px-4 py-7 sm:px-6 space-y-6 bg-[#F3F6F3]">
     <header>
@@ -237,11 +239,12 @@ export default function SopLibrary() {
     <section className="overflow-hidden rounded-2xl border border-[#D8E2DA] bg-white shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#D8E2DA] bg-[#F3F6F3] px-5 py-4">
         <div><h2 className="font-bold text-[#26352C]">Available procedures</h2></div>
-        <span className="text-xs text-[#64736A]">{documents.length} documents</span>
+        <span className="text-xs text-[#64736A]">{visibleDocuments.length} of {documents.length} procedures</span>
       </div>
-      {documents.length === 0 ? <p className="p-5 text-sm text-[#64736A]">No documents found.</p> : <div className="divide-y divide-[#D8E2DA]">
-        {documents.map((doc) => <div key={`${doc.sop_id}:${doc.revision}:${doc.sha256 || doc.storage_type}`} className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 hover:bg-[#F3F6F3]">
-          <div className="flex min-w-0 items-start gap-3"><FileText className="mt-0.5 h-4 w-4 shrink-0 text-[#64736A]" /><div className="min-w-0"><div className="text-sm font-semibold text-[#26352C]">{doc.title}</div><div className="mt-1 text-xs text-[#64736A]">{doc.sop_id} · {doc.equipment || 'Equipment unspecified'} · Rev {doc.revision || 'unknown'}</div>{doc.source_pdf && <div className="mt-1 text-xs text-[#64736A]">{doc.source_pdf}</div>}</div></div>
+      <div className="border-b border-[#D8E2DA] p-4"><label className="sr-only" htmlFor="sop-library-search">Search procedures</label><input id="sop-library-search" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search by SOP ID, title, or area" className={fieldClass} /></div>
+      {visibleDocuments.length === 0 ? <p className="p-5 text-sm text-[#64736A]">{documents.length ? 'No procedures match this search.' : 'No documents found.'}</p> : <div className="divide-y divide-[#D8E2DA]">
+        {visibleDocuments.map((doc) => <div key={`${doc.sop_id}:${doc.revision}:${doc.sha256 || doc.storage_type}`} className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 hover:bg-[#F3F6F3]">
+          <div className="flex min-w-0 items-start gap-3"><FileText className="mt-0.5 h-4 w-4 shrink-0 text-[#64736A]" /><div className="min-w-0"><div className="text-sm font-semibold text-[#26352C]">{doc.title}</div><div className="mt-1 text-xs text-[#64736A]">{doc.sop_id} · {doc.equipment || 'Equipment unspecified'} · Rev {doc.revision || 'unknown'} · Pages {(doc.source_pages || []).join(', ') || 'see source document'}</div>{doc.source_pdf && <div className="mt-1 text-xs text-[#64736A]">{doc.source_pdf}</div>}{doc.document_status && <div className="mt-1 text-xs text-[#805600]">{doc.document_status}</div>}{doc.source_pdf && doc.sha256 && <a className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#006B35] hover:underline" href={getSopSourceUrl(doc.sop_id, doc.revision, doc.sha256)} target="_blank" rel="noreferrer">Open source pages <ExternalLink className="h-3 w-3" /></a>}</div></div>
           <span className={`rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${doc.approved === true && doc.approval_reference ? 'border-[#009530]/30 bg-[#E8F5EC] text-[#006B35]' : 'border-[#B7791F]/30 bg-[#FFF8E8] text-[#805600]'}`}>{doc.approved === true && doc.approval_reference ? 'APPROVED' : 'NOT APPROVED'}</span>
         </div>)}
       </div>}

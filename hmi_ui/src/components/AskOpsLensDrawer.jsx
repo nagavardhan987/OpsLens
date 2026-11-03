@@ -74,7 +74,20 @@ export default function AskOpsLensDrawer({ event, equipment, isOpen, onClose }) 
         {loading && <div className="copilot-state text-slate-700" role="status"><LoaderCircle size={17} className="animate-spin text-emerald-700" />{status || 'Reviewing stored incident evidence…'}</div>}
         {error && <div role="alert" className="copilot-error"><AlertCircle size={17} />{error}</div>}
         {(answer || draft) && <article className="copilot-response-card">
-          {answer && <p role="status" className="mx-4 mt-3 text-[11px] text-slate-500">{assistantDisplayStatus(answer).text}</p>}
+          {answer && (
+            <div className="mx-4 mt-3 flex items-center gap-2">
+              <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium ${
+                assistantDisplayStatus(answer).tone === 'ai'
+                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                  : 'bg-slate-100 text-slate-600 border border-slate-200'
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${
+                  assistantDisplayStatus(answer).tone === 'ai' ? 'bg-emerald-500' : 'bg-slate-400'
+                }`} />
+                {assistantDisplayStatus(answer).text}
+              </span>
+            </div>
+          )}
           {answer && <section className="mx-4 mt-3 rounded-lg border border-[#D8E2DA] bg-white p-4 text-[#26352C]" aria-label="Answer to operator question"><h3 className="text-sm font-semibold">{answer.question || askedQuestion}</h3><p className="mt-2 whitespace-pre-wrap text-sm leading-6">{answer.question_answer || answer.answer || NO_EVIDENCE}</p></section>}
           {draft && !answer && <p className="mx-4 mt-3 whitespace-pre-wrap text-sm text-slate-700">{draft}</p>}
         </article>}

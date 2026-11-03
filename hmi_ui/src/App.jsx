@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Activity, ChevronLeft, ChevronRight, ClipboardList, History, LayoutDashboard, Lightbulb, ListChecks, Menu, Network } from 'lucide-react';
+import { Activity, ChevronLeft, ClipboardList, History, LayoutDashboard, Menu, Network } from 'lucide-react';
 import ProcessValues from './components/ProcessValues';
 import EventStory from './components/EventStory';
 import EvidenceSection from './components/EvidenceSection';
@@ -7,6 +7,7 @@ import RelevantSop from './components/RelevantSop';
 import NextBestAction from './components/NextBestAction';
 import ShiftHandoverCard from './components/ShiftHandoverCard';
 import AlarmHistory from './components/AlarmHistory';
+import ShiftHandoverPage from './components/ShiftHandoverPage';
 import IncidentOverview from './components/IncidentOverview';
 import AlarmQueue from './components/AlarmQueue';
 import IncidentAnalysis from './components/IncidentAnalysis';
@@ -14,18 +15,24 @@ import AskOpsLensDrawer from './components/AskOpsLensDrawer';
 import SopModal from './components/SopModal';
 import AlarmPopup from './components/AlarmPopup';
 import SopLibrary from './components/SopLibrary';
-import HandoverModal from './components/HandoverModal';
 import { resolveEventEquipment } from './lib/equipmentPresentation';
+import { getAcknowledgementTarget, isAlarmAcknowledged, summarizeAlarmStates } from './lib/alarmState';
 import { getWorkflowSubmission, hasSubsequentClearAlarmReading, workflowActionFailureMessage, workflowActionSuccessMessage } from './lib/operatorWorkflow';
 import {
   subscribeToEventStream,
   getFullEvent,
   getRecentEvents,
+  getAlarmHistory,
+  getCurrentHandover,
+  getHandoverHistory,
+  getHandoverRecord,
+  submitHandover,
+  respondToHandoverItem,
+  confirmHandover,
   getRankedIncidents,
   askOpsLensStream,
   logOperatorAction,
   markIncidentUnresolved,
-  compileHandover,
   getIntegrationStatus,
 } from './api/client';
 
@@ -34,6 +41,11 @@ export default function App() {
   const [currentEventId, setCurrentEventId] = useState(null);
   const [handover, setHandover] = useState(null);
   const [recentEvents, setRecentEvents] = useState([]);
+  const [alarmHistory, setAlarmHistory] = useState([]);
+  const [handoverHistory, setHandoverHistory] = useState([]);
+  const [selectedHandover, setSelectedHandover] = useState(null);
+  const [handoverSubmitting, setHandoverSubmitting] = useState(false);
+  const [handoverError, setHandoverError] = useState('');
   const [rankedIncidents, setRankedIncidents] = useState([]);
   const [integrationStatus, setIntegrationStatus] = useState(null);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -62,7 +74,6 @@ export default function App() {
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
 
   const [isSopModalOpen, setIsSopModalOpen] = useState(false);
-  const [isHandoverModalOpen, setIsHandoverModalOpen] = useState(false);
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
 
   const timersRef = useRef([]);
@@ -92,7 +103,17 @@ export default function App() {
   };
 
   const refreshHandover = useCallback(async () => {
-    try { const h = await compileHandover(); setHandover(h); } catch (_) {}
+    try { const h = await getCurrentHandover(); setHandover(h); } catch (_) {}
+  }, []);
+
+  const refreshHandoverHistory = useCallback(async () => {
+    try { setHandoverHistory(await getHandoverHistory()); } catch (_) {}
+  }, []);
+
+  const refreshAlarmHistory = useCallback(async () => {
+    try { const result = await getAlarmHistory(); setAlarmHistory(result.alarms || []); setHistoryError(''); }
+    catch (_) { setHistoryError('Alarm history is temporarily unavailable.'); }
+    finally { setHistoryLoading(false); }
   }, []);
 
   const refreshRecentEvents = useCallback(async () => {
@@ -193,6 +214,8 @@ export default function App() {
     } catch (_) { setServiceError('This incident could not be loaded. Try again.'); }
   }, []);
 
+  const navigateAlarmHistory = useCallback(() => setActivePage('Alarm History'), []);
+
   useEffect(() => {
     const eventId = fullEvent?.event_id;
     if (!eventId || analysisEventRef.current === eventId) return undefined;
@@ -226,11 +249,15 @@ export default function App() {
     const unsub = subscribeToEventStream(handleLiveEvent, () => {});
     refreshHandover();
     refreshRecentEvents();
+    refreshAlarmHistory();
+    refreshHandoverHistory();
     refreshActiveIncident();
     const poll = setInterval(refreshActiveIncident, 2500);
     const historyPoll = setInterval(refreshRecentEvents, 10000);
-    return () => { clearAllTimers(); clearInterval(poll); clearInterval(historyPoll); unsub(); };
-  }, [handleLiveEvent, refreshActiveIncident, refreshHandover, refreshRecentEvents]);
+    const alarmHistoryPoll = setInterval(refreshAlarmHistory, 15000);
+    const handoverPoll = setInterval(refreshHandover, 15000);
+    return () => { clearAllTimers(); clearInterval(poll); clearInterval(historyPoll); clearInterval(alarmHistoryPoll); clearInterval(handoverPoll); unsub(); };
+  }, [handleLiveEvent, refreshActiveIncident, refreshAlarmHistory, refreshHandover, refreshHandoverHistory, refreshRecentEvents]);
 
   const handleOperatorAction = async (actionType, notes) => {
     if (!currentEventId || actionSubmitRef.current) return false;
@@ -253,12 +280,15 @@ export default function App() {
         const safeNotes = actionType === 'RESOLVE'
           ? `Operator attests runtime alarm is clear. ${notes || ''}`.trim()
           : submission.notes || `Operator recorded ${actionType}`;
-        res = await logOperatorAction({ eventId: currentEventId, operator: 'J. Rivera (Shift 2)', actionType: submission.actionType, notes: safeNotes });
+        const acknowledgementTarget = actionType === 'ACKNOWLEDGE' ? getAcknowledgementTarget(fullEvent || {}) : null;
+        res = await logOperatorAction({ eventId: currentEventId, operator: 'J. Rivera (Shift 2)', actionType: submission.actionType, alarmId: acknowledgementTarget?.alarm_id, notes: safeNotes });
       }
       const savedAction = res.action || res;
       setRecordedAction(savedAction);
       await refreshHandover();
       await refreshRecentEvents();
+      if (actionType === 'ACKNOWLEDGE') await refreshAlarmHistory();
+      if (actionType === 'ACKNOWLEDGE') await refreshActiveIncident();
       const updated = await getFullEvent(currentEventId);
       if (updated) {
         setFullEvent(updated);
@@ -267,7 +297,7 @@ export default function App() {
       }
       setOperatorActionSuccess(workflowActionSuccessMessage(actionType));
       if (actionType === 'RESOLVE') {
-        setTimeout(() => setIsHandoverModalOpen(true), 400);
+        setTimeout(() => { refreshHandover(); setActivePage('Shift Handover'); }, 400);
       }
       return true;
     } catch (error) {
@@ -297,7 +327,8 @@ export default function App() {
     || analysisAnswer?.supporting_readings?.find((reading) => reading?.data_source || reading?.source)?.source
     || null;
   const openIncidentGroups = rankedIncidents.filter((item) => item.is_open !== false && item.status !== 'RESOLVED');
-  const activeAlarmCount = openIncidentGroups.reduce((count, item) => count + (Array.isArray(item.individual_alarms) && item.individual_alarms.length ? item.individual_alarms.length : 1), 0);
+  const alarmStateCounts = summarizeAlarmStates(openIncidentGroups);
+  const activeAlarmCount = alarmStateCounts.active;
   const alarmGroups = new Set(openIncidentGroups.map((item) => item.group_id || item.alarm_group || item.equipment_id || item.correlated?.equipment_id || item.candidate?.equipment_id || item.individual_alarms?.[0]?.equipment_id || item.individual_alarms?.[0]?.equipment).filter(Boolean)).size;
   const topPriority = rankedIncidents[0]?.priority || rankedIncidents[0]?.urgency?.urgency_band || rankedIncidents[0]?.severity || '—';
   const sourceText = String(selectedDataSource || '').toLowerCase();
@@ -320,6 +351,11 @@ export default function App() {
   const openAlarmHistory = () => { setHistoryOpen(true); openIncidentDetails(); };
   const openAllActiveAlarms = () => { setActiveAlarmsOpen(true); openIncidentDetails(); };
   const recordWorkflowAction = (actionType, notes) => handleOperatorAction(actionType, notes);
+  const incidentAlarms = fullEvent?.individual_alarms || [];
+  const acknowledgementTarget = getAcknowledgementTarget(fullEvent || {});
+  const hasAcknowledgedAlarm = incidentAlarms.some(isAlarmAcknowledged)
+    || (fullEvent?.actions || []).some((action) => ['ACKNOWLEDGE', 'ACKNOWLEDGED'].includes(String(action.action_type || '').toUpperCase()));
+  const canAcknowledge = incidentAlarms.length ? Boolean(acknowledgementTarget) : !hasAcknowledgedAlarm;
   const openWorkflowNote = (actionType) => {
     setOperatorActionError('');
     setOperatorActionSuccess('');
@@ -331,7 +367,7 @@ export default function App() {
       <div className="operator-workspace">
       <nav className={`operator-sidebar ${sidebarExpanded ? 'expanded' : 'collapsed'}`} aria-label="Main navigation">
         <button className="operator-sidebar-toggle" type="button" aria-label={sidebarExpanded ? 'Collapse navigation' : 'Expand navigation'} onClick={() => setSidebarExpanded((value) => !value)}>{sidebarExpanded ? <ChevronLeft size={19}/> : <Menu size={19}/>}</button>
-        {[['Overview', LayoutDashboard], ['Event Story', Activity], ['Evidence Engine', Network], ['Incident History', History]].map(([label, Icon]) => <button key={label} type="button" title={label} aria-current={activePage === label ? 'page' : undefined} className={`operator-nav-item ${activePage === label ? 'active' : ''}`} onClick={() => { setActivePage(label); if (window.innerWidth < 760) setSidebarExpanded(false); }}><Icon size={19}/>{sidebarExpanded && <span>{label}</span>}</button>)}
+        {[['Overview', LayoutDashboard], ['Event Story', Activity], ['Evidence Engine', Network], ['Incident History', History], ['Shift Handover', ClipboardList]].map(([label, Icon]) => <button key={label} type="button" title={label} aria-current={activePage === label ? 'page' : undefined} className={`operator-nav-item ${activePage === label ? 'active' : ''}`} onClick={() => { setActivePage(label); if (window.innerWidth < 760) setSidebarExpanded(false); }}><Icon size={19}/>{sidebarExpanded && <span>{label}</span>}</button>)}
       </nav>
       {sidebarExpanded && <button className="operator-sidebar-backdrop" aria-label="Close navigation" onClick={() => setSidebarExpanded(false)} />}
 
@@ -366,6 +402,8 @@ export default function App() {
           </section>
         </section>
 
+        <ShiftHandoverCard handover={handover} onOpenPage={() => setActivePage('Shift Handover')} onOpenModal={() => setActivePage('Shift Handover')} />
+
         <section className="operator-panel operator-timeline" aria-labelledby="operator-timeline-heading">
           <div className="operator-section-heading"><div><h2 id="operator-timeline-heading">Event Story</h2></div><button type="button" className="operator-text-button" onClick={openIncidentDetails}>View details</button></div>
           <EventStory story={fullEvent?.story} isIncident={hasEvent} revealedCount={Math.min(simStep, stepsLen)} compact selectedStep={selectedStoryStep} onSelectStep={setSelectedStoryStep} dataSource={selectedDataSource} relatedAlarm={relatedAlarm} />
@@ -378,6 +416,7 @@ export default function App() {
         <section className="operator-workflow" aria-label="Resolution and operator workflow">
           <div className="operator-workflow-title"><span className="operator-eyebrow">Resolution</span><strong>{hasEvent ? isIncident ? 'Operator workflow' : 'Incident reported clear' : 'Select an incident to begin'}</strong></div>
           <div className="operator-workflow-actions">
+            <button type="button" className="acknowledge" disabled={!hasEvent || !isIncident || !canAcknowledge || operatorActionSubmitting} onClick={() => recordWorkflowAction('ACKNOWLEDGE', 'OpsLens acknowledgement recorded; source alarm remains active until cleared. No PLC write performed.')}>{canAcknowledge ? 'Acknowledge' : 'ACKNOWLEDGED'}</button>
             <button type="button" disabled={!hasEvent || operatorActionSubmitting} onClick={() => recordWorkflowAction('VERIFY', 'Operator independently verified the displayed incident details. Alarm state unchanged.')}>Verify</button>
             <button type="button" disabled={!hasEvent || operatorActionSubmitting} onClick={() => recordWorkflowAction('INSPECT', 'Operator recorded an inspection acknowledgement; no PLC write performed.')}>Inspect</button>
             <button type="button" disabled={!hasEvent} onClick={() => setIsAssistantOpen(true)}>AI Guidance</button>
@@ -395,7 +434,8 @@ export default function App() {
         {activePage === 'Root Cause Analysis' && <section className="operator-page-panel">{hasEvent ? <IncidentAnalysis incident={fullEvent} answer={analysisAnswer} draft={analysisDraft} status={analysisStatus} loading={analysisLoading} error={analysisError} sopData={{ ...(fullEvent?.sop_match || {}), sop_resolution: fullEvent?.sop_resolution, resolved_sop_sources: fullEvent?.resolved_sop_sources }} onOpenSop={() => setIsSopModalOpen(true)} onAskOpsLens={() => setIsAssistantOpen(true)} onSelectHistorical={selectHistoryEvent} /> : <p>Select an incident to view its assessment.</p>}</section>}
         {activePage === 'Recommended Actions' && <section className="operator-panel operator-page-panel"><div className="operator-section-heading"><h1>Recommended Actions</h1><span>{fullEvent?.sop_resolution?.approved === true ? 'Approved guidance available' : 'No approved guidance verified'}</span></div><NextBestAction guidance={fullEvent?.sop_resolution?.approved === true ? fullEvent?.guidance : null} actions={fullEvent?.sop_resolution?.approved === true ? (fullEvent?.guidance?.next_best_actions || []) : []} referenceOnly={Boolean(fullEvent?.resolved_sop_sources?.length) && fullEvent?.sop_resolution?.approved !== true} equipmentId={equipmentId} primaryTag={fullEvent?.evidence?.likely_contributor_tag || primaryTag} recordedAction={recordedAction} onExecuteAction={handleOperatorAction} onOpenSopModal={() => setIsSopModalOpen(true)} isIncident={hasEvent} isVisible={true} isResolved={!isIncident} alarmClearObserved={hasSubsequentClearAlarmReading(fullEvent?.runtime_alarm_state)} actionError={operatorActionError} actionSubmitting={operatorActionSubmitting} /></section>}
         {activePage === 'SOP Library' && <SopLibrary />}
-        {activePage === 'Incident History' && <section className="operator-panel operator-page-panel"><div className="operator-section-heading"><h1>Incident History</h1><span>{recentEvents.length} recorded</span></div><AlarmHistory events={recentEvents} loading={historyLoading} error={historyError} onSelectEvent={selectHistoryEvent} /></section>}
+        {activePage === 'Incident History' && <section className="operator-page-panel"><div className="operator-section-heading"><h1>Alarm History</h1><span>{alarmHistory.length} alarm record(s) · linked incidents stay separate</span></div><AlarmHistory alarms={alarmHistory} loading={historyLoading} error={historyError} onSelectEvent={selectHistoryEvent} /></section>}
+        {activePage === 'Shift Handover' && <section className="operator-page-panel"><ShiftHandoverPage summary={handover} onSelectIncident={selectHistoryEvent} onOpenAlarmHistory={navigateAlarmHistory} onRefresh={refreshHandover} /></section>}
 
         {activePage === 'Overview' && <details id="incident-details" className="operator-detail-drawer" open={detailsOpen} onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
           <summary><span>Incident details and supporting records</span>{equipmentId && <span>{equipmentId}</span>}</summary>
@@ -405,8 +445,8 @@ export default function App() {
             {hasEvent && <IncidentAnalysis incident={fullEvent} answer={analysisAnswer} draft={analysisDraft} status={analysisStatus} loading={analysisLoading} error={analysisError} sopData={{ ...(fullEvent?.sop_match || {}), sop_resolution: fullEvent?.sop_resolution, resolved_sop_sources: fullEvent?.resolved_sop_sources }} onOpenSop={() => setIsSopModalOpen(true)} onAskOpsLens={() => setIsAssistantOpen(true)} onSelectHistorical={selectHistoryEvent} />}
             {hasEvent && <details className="dashboard-details"><summary>Full event timeline</summary><div className="operator-detail-inner"><EventStory story={fullEvent?.story} isIncident={hasEvent} revealedCount={Math.min(simStep, stepsLen)} dataSource={selectedDataSource} /></div></details>}
             {hasEvent && <details className="dashboard-details"><summary>Evidence details</summary><div className="operator-detail-inner"><EvidenceSection evidence={fullEvent?.evidence} evidenceAudit={fullEvent?.evidence_audit} isIncident={hasEvent} isVisible={panelsVisible} /></div></details>}
-            {hasEvent && <details className="dashboard-details"><summary>Procedure and operator records</summary><div className="operator-detail-inner"><RelevantSop sopData={{ ...(fullEvent.sop_match || {}), sop_resolution: fullEvent.sop_resolution, resolved_sop_sources: fullEvent.resolved_sop_sources }} onOpenSopModal={() => setIsSopModalOpen(true)} isIncident={hasEvent} isVisible={panelsVisible} /><div className="operator-detail-grid"><NextBestAction guidance={fullEvent?.sop_resolution?.approved === true ? fullEvent?.guidance : null} actions={fullEvent?.sop_resolution?.approved === true ? (fullEvent?.guidance?.next_best_actions || []) : []} referenceOnly={Boolean(fullEvent?.resolved_sop_sources?.length) && fullEvent?.sop_resolution?.approved !== true} equipmentId={equipmentId} primaryTag={fullEvent?.evidence?.likely_contributor_tag || primaryTag} recordedAction={recordedAction} onExecuteAction={handleOperatorAction} onOpenSopModal={() => setIsSopModalOpen(true)} isIncident={hasEvent} isVisible={panelsVisible} isResolved={!isIncident} alarmClearObserved={hasSubsequentClearAlarmReading(fullEvent?.runtime_alarm_state)} actionError={operatorActionError} actionSubmitting={operatorActionSubmitting} /><ShiftHandoverCard handover={handover} unitName={equipmentId} onOpenModal={() => setIsHandoverModalOpen(true)} isIncident={hasEvent} fullEvent={fullEvent} /></div></div></details>}
-            <details className="dashboard-details" open={historyOpen} onToggle={(event) => setHistoryOpen(event.currentTarget.open)}><summary>Alarm history · {historyLoading ? 'Loading…' : `${recentEvents.length} recorded events`}</summary><div className="operator-detail-inner"><AlarmHistory events={recentEvents} loading={historyLoading} error={historyError} onSelectEvent={selectHistoryEvent} /></div></details>
+            {hasEvent && <details className="dashboard-details"><summary>Procedure and operator records</summary><div className="operator-detail-inner"><RelevantSop sopData={{ ...(fullEvent.sop_match || {}), sop_resolution: fullEvent.sop_resolution, resolved_sop_sources: fullEvent.resolved_sop_sources }} onOpenSopModal={() => setIsSopModalOpen(true)} isIncident={hasEvent} isVisible={panelsVisible} /><div className="operator-detail-grid"><NextBestAction guidance={fullEvent?.sop_resolution?.approved === true ? fullEvent?.guidance : null} actions={fullEvent?.sop_resolution?.approved === true ? (fullEvent?.guidance?.next_best_actions || []) : []} referenceOnly={Boolean(fullEvent?.resolved_sop_sources?.length) && fullEvent?.sop_resolution?.approved !== true} equipmentId={equipmentId} primaryTag={fullEvent?.evidence?.likely_contributor_tag || primaryTag} recordedAction={recordedAction} onExecuteAction={handleOperatorAction} onOpenSopModal={() => setIsSopModalOpen(true)} isIncident={hasEvent} isVisible={panelsVisible} isResolved={!isIncident} alarmClearObserved={hasSubsequentClearAlarmReading(fullEvent?.runtime_alarm_state)} actionError={operatorActionError} actionSubmitting={operatorActionSubmitting} /></div></div></details>}
+            <details className="dashboard-details" open={historyOpen} onToggle={(event) => setHistoryOpen(event.currentTarget.open)}><summary>Alarm history · {historyLoading ? 'Loading…' : `${alarmHistory.length} alarm records`}</summary><div className="operator-detail-inner"><AlarmHistory alarms={alarmHistory} loading={historyLoading} error={historyError} onSelectEvent={selectHistoryEvent} /></div></details>
           </div>
         </details>}
       </main>
@@ -414,7 +454,6 @@ export default function App() {
 
       {/* Modals */}
       <SopModal isOpen={isSopModalOpen} onClose={() => setIsSopModalOpen(false)} sopData={fullEvent ? { ...(fullEvent.sop_match || {}), sop_resolution: fullEvent.sop_resolution, resolved_sop_sources: fullEvent.resolved_sop_sources } : null} />
-      <HandoverModal isOpen={isHandoverModalOpen} onClose={() => setIsHandoverModalOpen(false)} handover={handover} unitName={equipmentId} isIncident={isIncident} />
       <AskOpsLensDrawer event={fullEvent} equipment={equipmentId} isOpen={isAssistantOpen} onClose={() => setIsAssistantOpen(false)} />
       {workflowDialog && <div className="workflow-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !operatorActionSubmitting) setWorkflowDialog(null); }}>
         <section className="workflow-dialog" role="dialog" aria-modal="true" aria-labelledby="workflow-dialog-title">

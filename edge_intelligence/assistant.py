@@ -158,7 +158,7 @@ def _operator_response(event: Dict[str, Any], response: Dict[str, Any]) -> Dict[
         bottom_line = "No similar incident records were found in the available day history; record completeness cannot be confirmed."
     elif unc == "historical_trend_observed" and trends:
         bottom_line = "Recorded process trends changed during the available context; the available data do not establish a cause."
-    elif unc in ("source_retrieved", "hypothetical_reasoning"):
+    elif unc in ("source_retrieved", "hypothetical_reasoning", "incident_context_mismatch"):
         bottom_line = response.get("answer") or f"{alarm_id} is recorded active on {equipment}."
     elif active is True:
         bottom_line = f"{alarm_id} is recorded active on {equipment}."
@@ -167,7 +167,7 @@ def _operator_response(event: Dict[str, Any], response: Dict[str, Any]) -> Dict[
     else:
         bottom_line = f"{alarm_id} is associated with {equipment}; current alarm input state is unavailable."
 
-    if contributor and unc not in ("source_retrieved", "hypothetical_reasoning"):
+    if contributor and unc not in ("source_retrieved", "hypothetical_reasoning", "incident_context_mismatch"):
         if contributor not in bottom_line:
             bottom_line += f" The Evidence Engine ranks {contributor} as a possible contributor, not a confirmed cause."
     elif unc and unc.startswith("insufficient") and "insufficient" not in bottom_line.lower():
@@ -484,6 +484,14 @@ def _approved_resolution_criteria(response: Dict[str, Any]) -> str:
 
 def _load_sop_document(sop_id: str, document_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Load one stored SOP by exact ID from the bundled catalog or Qdrant."""
+    if not document_id or document_id in (sop_id, "SOP-MAN-000"):
+        try:
+            from demo_sop_sections import load_demo_sop_document
+            demo_document = load_demo_sop_document(sop_id)
+            if demo_document:
+                return demo_document
+        except Exception:
+            pass
     doc_dir = Path(__file__).parent / "sop_documents"
     if doc_dir.exists() and (not document_id or document_id == sop_id):
         for path in doc_dir.glob("*.json"):
@@ -552,13 +560,15 @@ def _resolve_retrieved_sop(
     sop_id = sop_match.get("sop_id")
     if not sop_id or sop_id in ("NONE", "SOP-NONE", "UNKNOWN-SOP"):
         unavailable = sop_match.get("retrieval_status") == "unavailable"
+        reason = (sop_match.get("why_retrieved") or {}).get("message")
         return ({
             "status": "retrieval_unavailable" if unavailable else "not_retrieved",
             "approved": False,
             "message": (
                 "SOP retrieval was unavailable; incident evidence remains available, but no applicable approved SOP could be verified."
-                if unavailable else
+                if unavailable else (reason or
                 "No applicable approved SOP passage was retrieved for this incident."
+                )
             ),
         }, [], [])
 
@@ -784,12 +794,24 @@ def build_assistant_response(
     asks_first_last = any(phrase in lower_question for phrase in ("first and last", "first value", "last value", "first reading", "last reading"))
     asks_actions = any(word in lower_question for word in ("operator action", "operator actions", "audit action", "what did the operator", "actions recorded"))
     asks_history = any(word in lower_question for word in ("last 30", "historical", "history", "before the alarm", "before this alarm", "what changed", "which readings", "trend", "changed during"))
-    asks_missing = any(phrase in lower_question for phrase in ("missing", "what information", "insufficient", "not recorded"))
+    asks_missing = any(phrase in lower_question for phrase in (
+        "missing", "what information", "additional information", "needed to confirm",
+        "confirm the suspected cause", "insufficient", "not recorded",
+    ))
     asks_interpretation = any(phrase in lower_question for phrase in (
         "explain", "contributed", "contribute", "what does", "what do", "indicate",
         "suspected cause", "help verify", "verify the cause",
     ))
-    asks_recurrence = any(phrase in lower_question for phrase in ("happened", "earlier today", "similar incident", "this valve today", "this pump today", "has this happened"))
+    asks_first_verification = any(phrase in lower_question for phrase in (
+        "verify first", "check first", "first verify", "first check", "verify before",
+    ))
+    asks_cause = any(phrase in lower_question for phrase in (
+        "what could have caused", "what caused", "possible cause", "root cause", "why did", "cause this alarm",
+    ))
+    asks_recurrence = any(phrase in lower_question for phrase in (
+        "earlier today", "similar incident", "this valve today", "this pump today",
+        "has this happened", "occurred before", "recurred", "recurrence",
+    ))
     is_hypothetical = (
         lower_question.startswith("what if")
         or lower_question.startswith("if ")
@@ -809,23 +831,38 @@ def build_assistant_response(
     alarm_id = candidate.get("alarm_id") or next((step.get("tag") for step in reversed(steps) if str(step.get("tag", "")).startswith("ALM-")), None) or candidate.get("primary_tag")
     primary_tag = candidate.get("primary_tag") or event.get("primary_tag") or ""
     equipment = (event.get("correlated") or {}).get("equipment_id")
-    if not equipment:
-        entry = TAG_REGISTRY.get(primary_tag)
-        if entry:
+    if not equipment or equipment == "Equipment not recorded":
+        entry = TAG_REGISTRY.get(primary_tag) or (TAG_REGISTRY.get(alarm_id) if alarm_id else None)
+        if entry and entry.equipment_id:
             equipment = entry.equipment_id
-        elif any(token in primary_tag for token in ("P02", "FLW", "VLV", "PIT", "MOT")):
+        elif any(token in primary_tag for token in ("P02", "FLW", "VLV", "PIT", "MOT")) or (alarm_id and "P02" in alarm_id):
             equipment = "Pump-02"
-        elif any(token in primary_tag for token in ("CMP", "C01")):
+        elif any(token in primary_tag for token in ("CMP", "C01")) or (alarm_id and "C01" in alarm_id):
             equipment = "Compressor-01"
-        elif any(token in primary_tag for token in ("TNK", "T01")):
+        elif any(token in primary_tag for token in ("TNK", "T01")) or (alarm_id and "T01" in alarm_id):
             equipment = "Tank-01"
+        elif any(token in primary_tag for token in ("SCR", "110", "IN")) or (alarm_id and ("SCR" in alarm_id or "110" in alarm_id)):
+            equipment = "InletWorks-01"
+        elif any(token in primary_tag for token in ("WW", "101")) or (alarm_id and "WW" in alarm_id):
+            equipment = "LiftStation-01"
+        elif any(token in primary_tag for token in ("AER", "201", "DO", "NH4")) or (alarm_id and "AER" in alarm_id):
+            equipment = "AerationBasin-01"
         elif "FLT" in primary_tag:
             equipment = "Filter-01"
         else:
             equipment = "Equipment not recorded"
     timestamp = candidate.get("trigger_timestamp") or event.get("trigger_timestamp")
     immediate_checks: List[str] = []
-    if is_hypothetical:
+
+    mismatch = detect_incident_mismatch(equipment, alarm_id or primary_tag, trends, question_text)
+    if mismatch:
+        answer = format_mismatch_response(mismatch, equipment, alarm_id or primary_tag, trends)
+        uncertainty = "incident_context_mismatch"
+        immediate_checks = [
+            f"Review {equipment} ({alarm_id or primary_tag}) telemetry on the HMI runtime.",
+            f"Switch to {mismatch.get('foreign_equipment')} on the incident list if you intended to inspect that equipment.",
+        ]
+    elif is_hypothetical:
         if "valve" in lower_question and any(w in lower_question for w in ("pressure", "normal", "high")):
             answer = (
                 "Hypothetical analysis: If valve position returned to normal while discharge pressure remained high, "
@@ -849,6 +886,49 @@ def build_assistant_response(
                 "Compare correlated process values against nominal operating baselines before concluding root cause.",
             ]
         uncertainty = "hypothetical_reasoning"
+    elif asks_first_verification:
+        usable = [trend for trend in trends if trend.get("reading_count", 0) > 0]
+        related_tags = [str(item.get("tag")) for item in usable[:2] if item.get("tag")]
+        if not related_tags:
+            related_tags = [str(step.get("tag")) for step in steps
+                            if step.get("tag") and not str(step.get("tag")).startswith("ALM-")][:2]
+        readings_text = (" and ".join(related_tags) if related_tags else "the associated process readings")
+        answer = (
+            f"First verify whether {alarm_id or primary_tag} is still active on the HMI, then compare the latest "
+            f"{readings_text} values with their timestamps and data-quality state. "
+            "This is read-only verification; it does not authorize a control change."
+        )
+        if sources:
+            pages = ", ".join(str(item.get("page")) for item in sources[:2] if item.get("page"))
+            answer += f" The retrieved {selected_sop_id} passage on source page(s) {pages or 'shown below'} is draft reference material, not approved instructions."
+        uncertainty = "evidence_based_first_verification"
+        immediate_checks = [f"Confirm {alarm_id or primary_tag} state on the HMI.",
+                            f"Review {readings_text} timestamps and quality flags."]
+    elif asks_cause:
+        usable = [trend for trend in trends if trend.get("reading_count", 0) > 0]
+        contributor = evidence.get("likely_contributor_tag")
+        sequence = [step.get("description") for step in steps if step.get("description")]
+        if contributor and usable:
+            relevant = [trend for trend in usable if trend.get("tag") == contributor]
+            trend_text = " ".join(_trend_sentence(item) for item in (relevant or usable[:2]))
+            answer = (
+                f"A possible contributor is {contributor}, which the Evidence Engine ranks from recorded signal changes. "
+                f"{trend_text} " if trend_text else f"A possible contributor is {contributor}, which the Evidence Engine ranks from recorded signal changes. "
+            )
+            if sequence:
+                answer += "Recorded sequence: " + "; ".join(sequence[:3]) + ". "
+            answer += "This supports a hypothesis for verification; timing and ranking do not confirm physical cause. Check instrument quality and relevant equipment state before drawing a conclusion."
+            uncertainty = "hypothesis_requires_operator_verification"
+        elif sequence or usable:
+            details = " ".join(_trend_sentence(item) for item in usable[:3]) if usable else "; ".join(
+                f"{step.get('tag')}: {step.get('description')}" for step in steps if step.get("description")
+            )
+            summary = story.get("causal_label")
+            answer = (f"Recorded incident summary: {summary}. " if summary else "") + f"The available evidence shows {details}. It does not identify a confirmed physical cause. Compare instrument quality, timestamps, and equipment-state records to assess possible explanations."
+            uncertainty = "hypothesis_requires_operator_verification"
+        else:
+            answer = f"The available record for {alarm_id or primary_tag} does not contain enough related readings or equipment-state observations to narrow a cause. Which sensor trend, alarm timestamp, or inspection observation can you provide?"
+            uncertainty = "insufficient_incident_evidence"
     elif wants_procedure:
         if approved_sop:
             step_list = sop_steps or [s.get("text", "") for s in sources if s.get("text")]
@@ -871,15 +951,15 @@ def build_assistant_response(
             if sources and sop_resolution.get("status") == "reference_unapproved":
                 locations = ", ".join(dict.fromkeys(str(item.get("section") or item.get("page") or "source passage") for item in sources[:3]))
                 answer_parts.append(
-                    f"Relevant reference-only content was retrieved from {selected_sop_id} ({locations}). "
-                    "Its approval status is not verified, so OpsLens cannot present it as authorized operating guidance. "
-                    "The source passages are shown separately for review."
+                    f"For {equipment} alarm {alarm_id or primary_tag}, the relevant reference passage is {selected_sop_id} ({locations}). "
+                    "The source is draft and not approved, so OpsLens cannot present its steps as authorized actions. "
+                    "Use the current plant-approved procedure and supervisor/maintenance escalation path; review the retrieved source separately for document-control confirmation."
                 )
             else:
-                resolution_message = sop_resolution.get("message") or "No relevant SOP step content was retrieved."
+                resolution_message = sop_resolution.get("message") or "No applicable approved SOP content was retrieved for this incident."
                 if any(word in lower_question for word in ("resolve", "fix", "steps", "operator", "what should")):
                     answer_parts.append(
-                        "No applicable approved SOP content was retrieved, so these are general read-only verification steps, not an approved procedure: "
+                        f"For {equipment} alarm {alarm_id or primary_tag}, no directly applicable equipment-failure SOP was retrieved; these are general read-only verification steps, not an approved procedure: "
                         "1. Confirm the alarm's current state on the HMI. "
                         "2. Check the latest relevant sensor readings and timestamps. "
                         "3. Inspect the components associated with the strongest evidence using authorized site practices. "
@@ -887,7 +967,7 @@ def build_assistant_response(
                         "5. Perform only authorized inspection or corrective actions. "
                         "6. Verify the equipment returns to approved operating conditions. "
                         "7. Record the outcome. "
-                        f"{resolution_message}"
+                        f"No applicable approved SOP content was retrieved. {resolution_message}"
                     )
                 else:
                     answer_parts.append(f"{resolution_message} Consult the approved plant procedure or responsible personnel before taking action.")
@@ -917,13 +997,13 @@ def build_assistant_response(
                 "cannot be confirmed."
             )
             uncertainty = "incomplete_or_empty_day_history"
-    elif asks_missing:
+    elif asks_missing and not (asks_interpretation and is_trend_query):
         missing = (context or {}).get("missing_data") or []
         if missing:
-            answer = "Information missing from the 30-minute context window: " + " ".join(missing)
+            answer = f"For {equipment} alarm {alarm_id or primary_tag}, information missing from the 30-minute context window: " + " ".join(missing)
             uncertainty = "missing_context_fields"
         else:
-            answer = "The 30-minute context window does not flag additional missing fields beyond what is shown in the supporting readings, events, and sources."
+            answer = f"For {equipment} alarm {alarm_id or primary_tag}, the 30-minute context window does not flag additional missing fields beyond the readings, events, and sources shown. To confirm the suspected cause, provide a time-stamped inspection observation or current sensor-quality and equipment-state records."
             uncertainty = "context_fields_present"
     elif asks_interpretation and is_trend_query:
         usable = [trend for trend in trends if trend.get("reading_count", 0) > 0]
@@ -990,15 +1070,15 @@ def build_assistant_response(
                 break
 
         if target_trend:
-            answer = f"For the 30-minute context window, recorded trend for {target_trend.get('tag')}: {_trend_sentence(target_trend)} Timestamped changes describe recorded telemetry timing, not confirmed physical causation."
+            answer = f"For {equipment} alarm {alarm_id or primary_tag}, recorded trend for {target_trend.get('tag')}: {_trend_sentence(target_trend)} Timestamped changes describe recorded telemetry timing, not confirmed physical causation."
             uncertainty = "historical_trend_observed"
             immediate_checks = [f"On the HMI, verify current reading for {target_trend.get('tag')} against nominal operating baseline."]
         elif usable:
-            answer = "For the 30-minute context window, recorded trends: " + " ".join(_trend_sentence(trend) for trend in usable)
+            answer = f"For {equipment} alarm {alarm_id or primary_tag}, recorded trends in the 30-minute context window: " + " ".join(_trend_sentence(trend) for trend in usable)
             answer += " Timestamped changes are calculations over recorded samples; they describe association and timing, not physical causation."
             uncertainty = "historical_trend_observed"
         else:
-            answer = "No usable numeric historical readings were recorded for the relevant tags in this 30-minute context window; no trend can be calculated."
+            answer = f"No usable numeric historical readings were recorded for {equipment} alarm {alarm_id or primary_tag} in this 30-minute context window; no trend can be calculated."
             uncertainty = "insufficient_historical_readings"
     else:
         label = story.get("causal_label") or "No event story is recorded for this incident."
@@ -1114,6 +1194,149 @@ def _render_operator_answer(response: Dict[str, Any]) -> str:
     if criteria:
         sections.append("Resolution criteria\n" + str(criteria))
     return "\n\n".join(sections)
+
+
+def _normalize_grounding_text(text: str) -> str:
+    """Normalize unicode punctuation, dashes, spaces, and quotes to standard ASCII."""
+    if not text or not isinstance(text, str):
+        return text or ""
+    # Non-breaking hyphens, figure dashes, en/em dashes, minus signs -> ASCII hyphen
+    text = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]", "-", text)
+    # Non-breaking spaces, narrow no-break spaces, zero-width, mathematical spaces -> standard space
+    text = re.sub(r"[\u00a0\u2000-\u200b\u202f\u205f\u3000\ufeff]", " ", text)
+    # Curly single quotes -> ASCII single quote
+    text = re.sub(r"[\u2018\u2019\u201a\u201b]", "'", text)
+    # Curly double quotes -> ASCII double quote
+    text = re.sub(r"[\u201c\u201d\u201e\u201f]", '"', text)
+    return text
+
+
+EQUIPMENT_KEYWORDS: Dict[str, Dict[str, Any]] = {
+    "InletWorks-01": {
+        "primary_tags": ["DPT-110-SCR", "FIT-110-IN", "ALM-SCR-110-DP"],
+        "terms": ["inlet", "screen", "coarse screen", "rake", "differential pressure", "dpt", "fit-110", "alm-scr"],
+        "excludes": ["valve restriction", "vlv-04", "feed pump", "compressor", "bearing vibration", "wet well", "dissolved oxygen"],
+    },
+    "Pump-02": {
+        "primary_tags": ["VLV-04-POS", "FIT-02-FLW", "PIT-02-PRS", "MOT-02-CUR", "ALM-P02-HP"],
+        "terms": ["pump", "pump-02", "valve", "valve restriction", "vlv", "discharge pressure", "motor current", "pit-02", "fit-02", "mot-02", "alm-p02"],
+        "excludes": ["screen", "rake", "coarse screen", "dpt-110", "compressor", "bearing", "aeration"],
+    },
+    "Compressor-01": {
+        "primary_tags": ["CMP-01-SPD", "CMP-01-VIB", "CMP-01-CUR", "CMP-01-TMP", "ALM-C01-VB"],
+        "terms": ["compressor", "bearing", "vibration", "overspeed", "cmp", "stator", "alm-c01"],
+        "excludes": ["screen", "rake", "valve restriction", "wet well", "dissolved oxygen"],
+    },
+    "LiftStation-01": {
+        "primary_tags": ["LIT-101-WWL", "MOT-101-CUR", "ALM-WW-101-HH"],
+        "terms": ["lift station", "wet well", "wet-well", "lit-101", "alm-ww"],
+        "excludes": ["screen", "rake", "compressor", "valve restriction"],
+    },
+    "AerationBasin-01": {
+        "primary_tags": ["AIT-201-DO", "AIT-201-NH4", "ALM-AER-201-DO", "ALM-AER-201-NH4"],
+        "terms": ["aeration", "dissolved oxygen", "ammonia", "ait-201", "alm-aer"],
+        "excludes": ["screen", "rake", "compressor", "valve restriction"],
+    },
+}
+
+
+def detect_incident_mismatch(
+    selected_equipment: str,
+    selected_alarm: str,
+    trends: List[Dict[str, Any]],
+    question: str,
+) -> Optional[Dict[str, Any]]:
+    """Detect whether a question references foreign equipment or contradicts recorded process telemetry."""
+    q_norm = _normalize_grounding_text(question)
+    q_lower = q_norm.lower()
+
+    foreign_matches: List[Tuple[str, List[str]]] = []
+    for eq_name, config in EQUIPMENT_KEYWORDS.items():
+        if eq_name.casefold() == str(selected_equipment).casefold():
+            continue
+        foreign_hits: List[str] = []
+        if eq_name.lower() in q_lower:
+            foreign_hits.append(eq_name)
+        for term in config["terms"]:
+            if term in ("pressure", "flow", "current"):
+                continue
+            if re.search(rf"\b{re.escape(term)}\b", q_lower):
+                foreign_hits.append(term)
+        if foreign_hits:
+            foreign_matches.append((eq_name, foreign_hits))
+
+    contradictions: List[str] = []
+    for trend in trends:
+        tag = str(trend.get("tag") or "")
+        delta = trend.get("absolute_change")
+        first = (trend.get("first_observed") or {}).get("value")
+        last = (trend.get("last_observed") or {}).get("value")
+        unit = str(trend.get("unit") or "")
+        pct = trend.get("percentage_change")
+        if any(token in tag.lower() for token in ("flow", "flw", "fit")):
+            if isinstance(delta, (int, float)):
+                if delta > 0 and any(w in q_lower for w in ("flow reduction", "flow decrease", "flow dropped", "flow drop", "reduced flow")):
+                    first_str = f"{first:g}" if isinstance(first, (int, float)) else "not recorded"
+                    last_str = f"{last:g}" if isinstance(last, (int, float)) else "not recorded"
+                    pct_str = f" (+{pct:.1f}%)" if pct is not None else ""
+                    contradictions.append(
+                        f"recorded telemetry shows {tag} increased from {first_str} to {last_str} {unit}{pct_str}, rather than reducing"
+                    )
+                elif delta < 0 and any(w in q_lower for w in ("flow increase", "flow rise", "flow surge", "increased flow")):
+                    first_str = f"{first:g}" if isinstance(first, (int, float)) else "not recorded"
+                    last_str = f"{last:g}" if isinstance(last, (int, float)) else "not recorded"
+                    pct_str = f" ({pct:.1f}%)" if pct is not None else ""
+                    contradictions.append(
+                        f"recorded telemetry shows {tag} decreased from {first_str} to {last_str} {unit}{pct_str}, rather than increasing"
+                    )
+
+    if foreign_matches or contradictions:
+        foreign_name = foreign_matches[0][0] if foreign_matches else "another equipment unit"
+        foreign_terms = foreign_matches[0][1] if foreign_matches else []
+        return {
+            "mismatch": True,
+            "selected_equipment": selected_equipment,
+            "selected_alarm": selected_alarm,
+            "foreign_equipment": foreign_name,
+            "foreign_terms": foreign_terms,
+            "contradictions": contradictions,
+        }
+    return None
+
+
+def format_mismatch_response(
+    mismatch_info: Dict[str, Any],
+    selected_equipment: str,
+    selected_alarm: str,
+    trends: List[Dict[str, Any]],
+) -> str:
+    """Build an incident-scoped clarification response correcting question premises."""
+    foreign = mismatch_info.get("foreign_equipment") or "another equipment unit"
+    terms = mismatch_info.get("foreign_terms") or []
+    contradictions = mismatch_info.get("contradictions") or []
+    trend_desc = []
+    for t in trends:
+        tag = t.get("tag")
+        first = (t.get("first_observed") or {}).get("value")
+        last = (t.get("last_observed") or {}).get("value")
+        unit = str(t.get("unit") or "")
+        delta = t.get("absolute_change")
+        if first is not None and last is not None:
+            dir_str = "rose" if delta and delta > 0 else "fell" if delta and delta < 0 else "changed"
+            trend_desc.append(f"{tag} {dir_str} from {first:g} to {last:g} {unit}".strip())
+    evidence_str = "; ".join(trend_desc) if trend_desc else f"evidence for {selected_equipment}"
+    joined_terms = ", ".join(terms[:2])
+    terms_str = f'"{joined_terms}"' if terms else "unrelated equipment"
+    parts = [
+        f"The currently selected incident is {selected_alarm} on {selected_equipment}, with recorded telemetry showing: {evidence_str}.",
+        f"Your question refers to {terms_str} (associated with {foreign} evidence), which is not part of the active {selected_equipment} incident record.",
+    ]
+    if contradictions:
+        parts.append("In addition, " + " ".join(contradictions) + ".")
+    parts.append(
+        f"Would you like to switch to the {foreign} incident to review that evidence, or clarify your question regarding the selected {selected_equipment} incident?"
+    )
+    return " ".join(parts)
 
 
 # Plant identifiers contain numeric segments in different positions (for
@@ -1353,12 +1576,17 @@ def _date_fragments(*blobs: Any) -> set[str]:
     return found
 
 
-def _clause_for_span(text: str, start: int, end: int) -> str:
+def _clause_bounds_for_span(text: str, start: int, end: int) -> tuple[int, int]:
     boundary = re.compile(r"[!?;\n]|(?<=\.)\s+(?=[A-Z\"'])")
     left_matches = list(boundary.finditer(text, 0, start))
     left = left_matches[-1].end() if left_matches else 0
     right_match = boundary.search(text, end)
     right = right_match.start() if right_match else len(text)
+    return left, right
+
+
+def _clause_for_span(text: str, start: int, end: int) -> str:
+    left, right = _clause_bounds_for_span(text, start, end)
     return text[left:right]
 
 
@@ -1370,7 +1598,9 @@ def _matches_tag_change(value: float, signed_token: str, clause: str, facts: lis
     percentage_points = bool(re.match(r"\s*percentage\s+points?\b", unit_context, re.IGNORECASE))
     relative_percent = (bool(re.match(r"\s*(?:%|percent(?:age)?\b)", unit_context, re.IGNORECASE))
                         and not percentage_points)
-    physical_unit = any(_unit_follows_value(unit, unit_context) for unit in ("L/min", "A", "bar"))
+    source_units = {str(fact.get("unit") or "").strip() for fact in facts if fact.get("unit")}
+    source_units.update(["L/min", "A", "bar", "kPa", "m³/h", "°C", "RPM", "mm/s", "mg/L", "m", "mm"])
+    physical_unit = any(_unit_follows_value(unit, unit_context) for unit in source_units if unit != "%")
     change_language = percentage_points or relative_percent or physical_unit or any(
         word in lowered for word in ("change", "delta", "fell", "decreased", "declined", "dropped", "reduced", "lower", "rose", "increased", "climbed", "surged", "higher", "up by")
     )
@@ -1396,17 +1626,22 @@ def _matches_tag_change(value: float, signed_token: str, clause: str, facts: lis
         direction_matches = (actual < 0 and decreasing) or (actual > 0 and increasing)
         if direction_matches and abs(value - abs(actual)) <= tolerance:
             return True
+        # Allow proportional rounding for larger whole-number percentages (e.g. 380% vs 384.8%)
+        if abs(actual) >= 20.0 and abs(value - abs(actual)) / abs(actual) <= 0.05:
+            if direction_matches or signed_token.startswith(("+", "-")) or not (decreasing or increasing):
+                return True
     return False
 
 
 def _matches_tag_reading(value: float, signed_token: str, clause: str, facts: list[Dict[str, Any]], unit_context: str = "") -> bool:
     """Match a reading only when its measurement unit or explicit range is present."""
     lowered = clause.lower()
+    all_units = ("L/min", "A", "bar", "%", "kPa", "m³/h", "°C", "RPM", "mm/s", "mg/L", "m", "mm")
     for fact in facts:
         if fact["change_type"] == "observation_count":
             if not re.search(r"\b(?:numeric\s+recorded\s+)?(?:readings?|samples?)\b", lowered):
                 continue
-            if any(_unit_follows_value(unit, unit_context) for unit in ("L/min", "A", "bar", "%")):
+            if any(_unit_follows_value(unit, unit_context) for unit in all_units):
                 continue
             if _matches_rounded_value(value, signed_token, fact):
                 return True
@@ -1418,7 +1653,6 @@ def _matches_tag_reading(value: float, signed_token: str, clause: str, facts: li
         range_claim = bool(re.search(r"\bfrom\s+[+-]?\d", lowered))
         if not unit_present and not range_claim:
             continue
-        actual = float(fact["exact_value"])
         if _matches_rounded_value(value, signed_token, fact):
             return True
     return False
@@ -1429,7 +1663,12 @@ def _matches_rounded_value(value: float, signed_token: str, fact: Dict[str, Any]
     actual = float(fact["exact_value"])
     decimal_places = len(signed_token.lstrip("+-").split(".", 1)[1]) if "." in signed_token else 0
     tolerance = 0.5 * (10 ** -decimal_places)
-    return abs(value - actual) <= tolerance
+    if abs(value - actual) <= tolerance:
+        return True
+    # Allow whole-number approximations within 0.5% for large readings (e.g. 2013 vs 2012.82)
+    if decimal_places == 0 and abs(actual) >= 100.0 and abs(value - actual) / abs(actual) <= 0.005:
+        return True
+    return False
 
 
 def _matches_tag_coverage(value: float, signed_token: str, clause: str, facts: list[Dict[str, Any]], unit_context: str) -> bool:
@@ -1542,6 +1781,7 @@ def _has_context_duration_framing(text: str, start: int, end: int) -> bool:
 def _llm_answer_rejection_reason(text: str, grounded: Dict[str, Any], compact: Dict[str, Any], wants_procedure: bool) -> Optional[str]:
     if not text or not isinstance(text, str) or len(text.strip()) < 8:
         return "empty_or_short_answer"
+    text = _normalize_grounding_text(text)
     lowered = text.lower()
     if wants_procedure:
         has_approved_passage = any(
@@ -1607,7 +1847,9 @@ def _llm_answer_rejection_reason(text: str, grounded: Dict[str, Any], compact: D
             value = float(token)
         except ValueError:
             return "ungrounded_numeric_value"
-        clause = _clause_for_span(text, match.start(), match.end())
+        clause_left, clause_right = _clause_bounds_for_span(text, match.start(), match.end())
+        clause = text[clause_left:clause_right]
+        rel_start = match.start() - clause_left
         clause_lower = clause.lower()
         is_hypo_context = any(m in clause_lower for m in (
             "hypothetical", "hypothetically", "if the", "if a", "if we", "if valve", "if pressure",
@@ -1630,21 +1872,35 @@ def _llm_answer_rejection_reason(text: str, grounded: Dict[str, Any], compact: D
             # must not pass via the generic exact-number evidence set.
             logger.warning("assistant_grounding_rejection claim_type=numeric token=%s tag_scope=unscoped reason=ungrounded_numeric_value", token)
             return "ungrounded_numeric_value"
+        unit_context = text[match.end():min(len(text), match.end() + 24)]
         mentioned_tags = [tag for tag in tag_facts if re.search(
             rf"(?<![A-Z0-9]){re.escape(tag)}(?![A-Z0-9])", clause, re.IGNORECASE
         )]
+        # If the number has an explicit engineering unit attached immediately after it,
+        # prefer tags whose configured unit matches this immediate unit.
+        immediate_unit_tags = [
+            tag for tag in mentioned_tags
+            if tag_facts[tag]["unit"] and (
+                _unit_follows_value(tag_facts[tag]["unit"], unit_context)
+                or (tag_facts[tag]["unit"] == "%" and bool(re.match(r"\s*percentage\s+points?\b", unit_context, re.IGNORECASE)))
+            )
+        ]
         # A nearby alarm identifier can be closer to a reading token than the
         # sensor tag that owns it (for example "DPT rose from 0.99 to 4.8 kPa
         # before ALM-..."). Prefer the unique tag whose engineering unit is
         # explicitly attached to the clause; fall back to positional scoping
         # only when the unit does not disambiguate the instruments.
-        unit_scoped_tags = [
+        clause_unit_tags = [
             tag for tag in mentioned_tags
             if tag_facts[tag]["unit"] and _unit_mentioned(tag_facts[tag]["unit"], clause)
         ]
-        scoped_tags = unit_scoped_tags if len(unit_scoped_tags) == 1 else _nearest_tag_scope(
-            clause, match.start(), mentioned_tags
-        )
+        if len(immediate_unit_tags) == 1:
+            scoped_tags = immediate_unit_tags
+        elif len(clause_unit_tags) == 1:
+            scoped_tags = clause_unit_tags
+        else:
+            scoped_tags = _nearest_tag_scope(clause, rel_start, mentioned_tags)
+
         if not scoped_tags:
             # A percentage-point unit can uniquely identify a % instrument,
             # but only when there is exactly one such instrument in this clause.
@@ -1655,10 +1911,6 @@ def _llm_answer_rejection_reason(text: str, grounded: Dict[str, Any], compact: D
                              if facts["unit"] and _unit_mentioned(facts["unit"], clause)]
             if len(unit_tags) == 1:
                 scoped_tags = unit_tags
-        # Bind the unit/semantic marker to the number immediately before it;
-        # a later percentage elsewhere in the same sentence must not change
-        # an earlier physical delta's meaning.
-        unit_context = text[match.end():min(len(text), match.end() + 24)]
         if scoped_tags:
             valid_for_scope = all(
                 _matches_tag_reading(value, token, clause, tag_facts[tag]["facts"], unit_context)
@@ -1737,6 +1989,15 @@ def _nearest_tag_scope(clause: str, number_start: int, tags: list[str]) -> list[
             occurrences.append((edge, tag))
     if not occurrences:
         return []
+    # If any tags precede the number in this clause, the closest preceding tag
+    # governs the measurement/claim (e.g., "VLV-04-POS closed by 58% from 80% to 22%").
+    # A subsequent tag must not steal values that describe the preceding tag.
+    preceding = [(number_start - pos, tag) for pos, tag in occurrences if pos <= number_start]
+    if preceding:
+        min_dist = min(dist for dist, _ in preceding)
+        winners = sorted({tag for dist, tag in preceding if dist == min_dist})
+        return winners if len(winners) == 1 else []
+
     distances = [(abs(position - number_start), tag) for position, tag in occurrences]
     nearest = min(distance for distance, _ in distances)
     winners = sorted({tag for distance, tag in distances if distance == nearest})
@@ -1755,7 +2016,7 @@ def _validate_llm_answer(text: str, grounded: Dict[str, Any], compact: Dict[str,
 
 
 def _parse_llm_payload(raw: str) -> Optional[Dict[str, Any]]:
-    cleaned = raw.strip()
+    cleaned = _normalize_grounding_text(raw.strip())
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned).strip()
@@ -1775,9 +2036,9 @@ def _parse_llm_payload(raw: str) -> Optional[Dict[str, Any]]:
     if not isinstance(checks, list):
         checks = []
     return {
-        "answer": str(data["answer"]).strip(),
+        "answer": _normalize_grounding_text(str(data["answer"]).strip()),
         "uncertainty_status": str(data.get("uncertainty_status") or "").strip() or None,
-        "immediate_checks": [str(item).strip() for item in checks if str(item).strip()][:2],
+        "immediate_checks": [_normalize_grounding_text(str(item).strip()) for item in checks if str(item).strip()][:2],
     }
 
 
@@ -1790,6 +2051,14 @@ def build_assistant_prompt(question: str, compact: Dict[str, Any]) -> str:
             "REFERENCE ONLY — NOT APPROVED. Describe what the passage covers; do not phrase it as "
             "an imperative, recommendation, operating instruction, setpoint, or resolution criterion. "
             "State that approved guidance was not retrieved. Do not derive immediate checks from it.\n"
+        )
+    mismatch_policy = ""
+    if compact.get("uncertainty_status") == "incident_context_mismatch":
+        mismatch_policy = (
+            "INCIDENT SCOPING & MISMATCH POLICY:\n"
+            "- The operator question refers to foreign equipment, components, or contradicts recorded telemetry for the selected incident.\n"
+            "- State clearly that the active incident is for the selected equipment and alarm, cite the recorded telemetry, "
+            "correct any premise contradiction (e.g. if flow increased rather than reduced), and ask whether the operator wishes to switch incidents or clarify their question.\n"
         )
     # Preserve the SOP excerpts and incident facts as a priority packet. A
     # blind character slice of the whole context used to truncate sop_passages
@@ -1842,6 +2111,8 @@ def build_assistant_prompt(question: str, compact: Dict[str, Any]) -> str:
         "Never present evidence scores as probabilities. If facts are missing, say so.\n"
         "Answer open-ended natural-language questions using relevant records in FACTS; these examples do not limit question types. For topology, actions, recurrence, or handover, use only the corresponding records and stated time coverage. If FACTS do not cover the requested period or topic, state what is unavailable.\n"
         "For missing-information questions, list only gaps explicitly present in missing_data or the selected-event facts.\n"
+        "INCIDENT CONTEXT BOUNDARIES: Answer strictly from the perspective of the selected incident. Never mix evidence across different equipment (e.g. Pump-02 vs InletWorks-01). If the question asks about equipment or phenomena not present in FACTS, politely explain the boundary of the selected incident, cite actual recorded readings, and ask whether the operator wishes to switch incidents or clarify the question.\n"
+        f"{mismatch_policy}"
         "For SOP questions, identify the document and section only when present in sop_passages. Check document_status and usage. If usage is reference_only_not_approved, summarize only the subject of the actual passage in descriptive language, label it REFERENCE ONLY — NOT APPROVED, and state that approved guidance was not retrieved; never turn it into an instruction or recommended action. You may still explain recorded readings, trends, event timing, and evidence-based hypotheses.\n"
         f"{unverified_sop_policy}"
         "This assistant cannot change setpoints, acknowledge alarms, or issue PLC commands.\n"
