@@ -1,0 +1,30 @@
+{
+  "sop_id": "SOP-C01-BRG-01",
+  "title": "Compressor-01 Drive-End Bearing Vibration & Fatigue Response",
+  "equipment_id": "Compressor-01",
+  "tags": ["CMP-01-VIB", "CMP-01-CUR", "CMP-01-TMP", "ALM-C01-VB"],
+  "keywords": [
+    "bearing vibration",
+    "stator current rise",
+    "bearing temperature rise",
+    "high vibration alarm",
+    "mechanical fatigue",
+    "drive end bearing",
+    "journal friction"
+  ],
+  "reference_limits": {
+    "max_trip_limit": 7.0,
+    "unit": "mm/s",
+    "parameter": "bearing_vibration",
+    "nominal_baseline": "1.2 - 2.8 mm/s",
+    "temperature_limit": "85.0 °C"
+  },
+  "steps": [
+    "Acknowledge high vibration alarm ALM-C01-VB on Compressor-01 supervisory console.",
+    "Check drive-end vibration transmitter CMP-01-VIB spectrum against 7.0 mm/s shutdown limit.",
+    "Monitor bearing temperature CMP-01-TMP trend; if temperature exceeds 85.0 °C, initiate controlled deceleration.",
+    "Check motor stator current CMP-01-CUR to assess mechanical drag from bearing seizure.",
+    "Engage auxiliary lube oil cooling pump and inspect bearing oil supply pressure.",
+    "If vibration does not drop below 2.8 mm/s baseline, trip compressor and dispatch maintenance for mechanical bearing inspection."
+  ]
+}

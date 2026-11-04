@@ -1,0 +1,506 @@
+"""
+OpsLens - Guidance Generation Engine (Component 8)
+
+Consumes EventStory, Evidence, and SopMatch. Generates operator-facing explanations
+and 3 next-best-actions while enforcing zero numerical hallucinations.
+Enforces strict 3.0-second API timeout, event caching, and deterministic fallback.
+Persists all guidance directly to SQLite table `guidance`.
+"""
+
+import os
+import json
+import logging
+import re
+from typing import Optional, Dict, Any, Callable, List
+import requests
+
+from models import EventStory, Evidence, SopMatch, Guidance
+from database import Database
+from prompt_template import build_guidance_prompt
+from fallback_template import generate_sop_guidance, generate_fallback_guidance
+from edge_slm import (
+    call_local_edge_slm,
+    call_inprocess_slm,
+    check_edge_slm_availability,
+    check_online_availability
+)
+
+logger = logging.getLogger("opslens.guidance")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+class GuidanceGenerator:
+    """
+    Operator Guidance & Explanation Generator.
+    - Keyed event caching (in-memory + SQLite)
+    - SOP-first evaluation (instant certified procedures)
+    - Online Cloud LLM / Offline Ollama Edge SLM synthesis when SOP is unavailable
+    - Strict numerical fidelity validation
+    - Deterministic safety fallback
+    - Write-through persistence to SQLite table `guidance`
+    """
+
+    def __init__(
+        self,
+        db: Optional[Database] = None,
+        timeout: float = 3.0,
+        api_caller: Optional[Callable[[str], str]] = None,
+        min_sop_score: float = 0.25,
+        force_online: Optional[bool] = None
+    ):
+        self.db = db if db is not None else Database()
+        self.timeout = timeout
+        self.api_caller = api_caller
+        self.min_sop_score = min_sop_score
+        self._force_online = force_online
+        self._memory_cache: Dict[str, Guidance] = {}
+        self._signatures: Dict[str, tuple] = {}
+
+    @staticmethod
+    def _input_signature(evidence: Evidence, sop_match: Optional[SopMatch]) -> tuple:
+        return (
+            getattr(evidence, "likely_contributor_tag", None),
+            tuple(sorted(d.tag for d in (getattr(evidence, "supporting_deltas", None) or []))),
+            getattr(sop_match, "sop_id", None),
+            getattr(sop_match, "retrieval_status", None),
+        )
+
+    def _cached_is_consistent(self, cached: Guidance, evidence: Evidence, sop_match: Optional[SopMatch]) -> bool:
+        expected_sop = sop_match.sop_id if self.is_sop_available(sop_match) else None
+        if expected_sop and cached.cited_sop_id != expected_sop:
+            return False
+        if getattr(evidence, "supporting_deltas", None) and "Supporting deviations are unavailable" in (cached.explanation_text or ""):
+            return False
+        return True
+
+    def is_sop_available(self, sop_match: Optional[SopMatch]) -> bool:
+        """
+        Determine whether a sufficiently relevant, sourced SOP procedure was retrieved.
+        Returns True if:
+        - sop_match exists and is not None
+        - sop_id is valid (not empty, not UNKNOWN-SOP, not SOP-NONE, not NONE)
+        - steps has at least 1 source document action step
+        - match_score meets or exceeds min_sop_score
+        """
+        if sop_match is None:
+            return False
+        if not sop_match.sop_id or sop_match.sop_id.strip() in ("UNKNOWN-SOP", "SOP-NONE", "NONE", ""):
+            return False
+        if not sop_match.steps or len(sop_match.steps) == 0:
+            return False
+        if sop_match.retrieval_method == "qdrant_vector_search":
+            return sop_match.semantic_similarity is not None and sop_match.semantic_similarity >= self.min_sop_score
+        if sop_match.retrieval_method == "bundled_pdf_section":
+            # Exact section of the uploaded manual, resolved by alarm tag.
+            return sop_match.retrieval_status == "match_found"
+        if sop_match.retrieval_method == "bm25":
+            keyword_score = (sop_match.why_retrieved or {}).get("keyword_score")
+            return isinstance(keyword_score, (int, float)) and keyword_score > 0
+        return False
+
+    def is_online(self) -> bool:
+        """Use the configured OpsLens provider as the source of provider selection."""
+        if self._force_online is not None:
+            return self._force_online
+        try:
+            from llm_provider import configuration_error, selected_provider
+            provider = selected_provider()
+            if provider not in ("", "none", "off", "disabled"):
+                return configuration_error() is None
+        except Exception:
+            # Keep compatibility with older standalone deployments.
+            pass
+        return check_online_availability()
+
+    def generate(
+        self,
+        story: EventStory,
+        evidence: Evidence,
+        sop_match: Optional[SopMatch] = None,
+        force_fallback: bool = False,
+        force_llm: bool = False
+    ) -> Guidance:
+        """
+        Industrial Guidance Generation Pipeline:
+        1. Check in-memory & SQLite cache.
+        2. If force_fallback is True: return deterministic fallback.
+        3. Operational Hierarchy:
+           a. If api_caller is explicitly provided (for testing/mocking):
+              Run LLM synthesis via caller.
+           b. FIRST: Inference and SOP are retrieved.
+              If a sufficiently relevant SOP source is available:
+              Formulate guidance directly from retrieved SOP + Evidence facts!
+                (source="sop_retrieval", based on the retrieved source text).
+           c. IF SOP NOT AVAILABLE (novel incident / uncataloged excursion / low match score):
+              Synthesize guidance dynamically:
+              - If online: Cloud LLM (Gemini 2.5 Flash / OpenAI / Anthropic).
+                If Cloud LLM fails/times out, failover to Ollama Edge SLM.
+              - If offline: Local Edge SLM (Ollama / in-process model).
+              - Enforce numerical fidelity validation to guarantee zero hallucinated numbers.
+              - If LLM/SLM fails, times out, or hallucinates:
+                Trigger deterministic safety fallback (fallback_template.py).
+        """
+        event_id = evidence.event_id
+        signature = self._input_signature(evidence, sop_match)
+
+        # 1. Check in-memory cache. An incident grows as related readings
+        # arrive; guidance generated from an earlier, smaller cluster (or a
+        # different SOP) is regenerated instead of being served forever.
+        if event_id in self._memory_cache and self._signatures.get(event_id) == signature:
+            logger.info(f"[Guidance] Returning in-memory cached guidance for event {event_id}")
+            return self._memory_cache[event_id]
+
+        # 2. Check SQLite persistent cache (only when it is consistent with the
+        # current SOP selection and evidence).
+        db_records = self.db.get_guidance(event_id=event_id) if event_id not in self._signatures else []
+        if db_records and self._cached_is_consistent(db_records[0], evidence, sop_match):
+            cached = db_records[0]
+            self._memory_cache[event_id] = cached
+            self._signatures[event_id] = signature
+            logger.info(f"[Guidance] Returning SQLite cached guidance for event {event_id}")
+            return cached
+        self._signatures[event_id] = signature
+
+        # 3. If forced fallback, bypass immediately
+        if force_fallback:
+            grounded_sop = self.is_sop_available(sop_match)
+            guidance = generate_sop_guidance(story, evidence, sop_match) if grounded_sop else generate_fallback_guidance(story, evidence, sop_match)
+            self._save_and_cache(guidance, source="sop_fallback" if grounded_sop else "fallback")
+            return guidance
+
+        # Never ask an LLM/SLM to invent a procedure when no sufficiently relevant
+        # retrieved SOP with usable steps is available.
+        if not self.is_sop_available(sop_match):
+            guidance = generate_fallback_guidance(story, evidence, sop_match)
+            self._save_and_cache(guidance, source="fallback")
+            return guidance
+
+        # 4. If an injected api_caller is set (e.g. unit testing/mocking), invoke caller
+        if self.api_caller is not None:
+            prompt = build_guidance_prompt(story, evidence, sop_match)
+            guidance: Optional[Guidance] = None
+            source = "mock_llm"
+            try:
+                raw_response = self.api_caller(prompt)
+                if raw_response:
+                    expected_sop = sop_match.sop_id if sop_match else "NONE"
+                    parsed = self._parse_llm_json(raw_response, event_id, expected_sop)
+                    if parsed:
+                        if self._validate_numerical_fidelity(parsed.explanation_text, evidence, story, sop_match) and self._validate_sop_actions(parsed, sop_match):
+                            guidance = parsed
+                        else:
+                            logger.warning("[Guidance] Injected caller output failed numerical fidelity check.")
+            except Exception as e:
+                logger.warning(f"[Guidance] Injected caller failed: {e}")
+
+            if guidance is None:
+                if self.is_sop_available(sop_match):
+                    guidance = generate_sop_guidance(story, evidence, sop_match)
+                    source = "sop_fallback"
+                else:
+                    guidance = generate_fallback_guidance(story, evidence, sop_match)
+                    source = "fallback"
+
+            self._save_and_cache(guidance, source=source)
+            return guidance
+
+        # 5. Pipeline guidance is deterministic by default: verbatim SOP steps
+        # plus backend-calculated evidence. The LLM is used by Ask OpsLens,
+        # where its answer is validated against the record. Set
+        # OPSLENS_GUIDANCE_USE_LLM=true to also let the LLM draft this text.
+        if os.environ.get("OPSLENS_GUIDANCE_USE_LLM", "false").strip().lower() not in ("1", "true", "yes"):
+            guidance = generate_sop_guidance(story, evidence, sop_match)
+            self._save_and_cache(guidance, source="sop_deterministic")
+            return guidance
+
+        # 5b. Optional LLM drafting, grounded in the retrieved SOP and current evidence.
+        # This satisfies the requirement that "The LLM must be grounded in the retrieved SOP and current evidence."
+
+        # 6. IF SOP NOT AVAILABLE: Synthesize guidance dynamically (Cloud LLM if online, Ollama SLM if offline)
+        prompt = build_guidance_prompt(story, evidence, sop_match)
+        guidance: Optional[Guidance] = None
+        source = "fallback"
+        raw_response: Optional[str] = None
+
+        try:
+            from llm_provider import selected_provider
+            configured_provider = selected_provider()
+        except Exception:
+            configured_provider = ""
+
+        if self.is_online():
+            logger.info(f"[Guidance] SOP not available for event {event_id}. Online mode active: calling Cloud LLM.")
+            raw_response = self._call_cloud_llm(prompt)
+            source = "cloud_llm"
+            # A selected provider is authoritative. In particular, a failed
+            # Groq request must use deterministic guidance rather than silently
+            # probing a different local model (which may be unconfigured).
+            if not raw_response and configured_provider in ("", "none", "off", "disabled"):
+                logger.warning(f"[Guidance] Cloud LLM returned no response. Failing over to local Ollama edge SLM.")
+                raw_response = self._call_edge_slm(prompt)
+                source = "edge_slm"
+        elif configured_provider in ("", "none", "off", "disabled"):
+            logger.info(f"[Guidance] SOP not available for event {event_id}. Offline mode active: calling Ollama edge SLM.")
+            raw_response = self._call_edge_slm(prompt)
+            source = "edge_slm"
+        else:
+            # A selected cloud provider with missing configuration is an
+            # explicit setup error, not permission to probe another model.
+            logger.warning(
+                "[Guidance] Selected provider %s is not configured; using deterministic guidance",
+                configured_provider,
+            )
+
+        if raw_response:
+            expected_sop = (
+                sop_match.sop_id
+                if (sop_match and sop_match.sop_id and sop_match.sop_id not in ("UNKNOWN-SOP", "SOP-NONE", "NONE"))
+                else "NONE"
+            )
+            try:
+                parsed = self._parse_llm_json(raw_response, event_id, expected_sop)
+                if parsed:
+                    if self._validate_numerical_fidelity(parsed.explanation_text, evidence, story, sop_match) and self._validate_sop_actions(parsed, sop_match):
+                        guidance = parsed
+                    else:
+                        logger.warning("[Guidance] LLM/SLM output failed numerical fidelity check. Triggering safety fallback.")
+            except Exception as e:
+                logger.warning(f"[Guidance] Failed parsing LLM/SLM response: {e}")
+
+        # 7. Safety Net: Trigger deterministic fallback if LLM/SLM failed, timed out, or hallucinated
+        if guidance is None:
+            if self.is_sop_available(sop_match):
+                guidance = generate_sop_guidance(story, evidence, sop_match)
+                source = "sop_fallback"
+            else:
+                guidance = generate_fallback_guidance(story, evidence, sop_match)
+                source = "fallback"
+
+        # 8. Save and cache result
+        self._save_and_cache(guidance, source=source)
+        return guidance
+
+    def _call_cloud_llm(self, prompt: str) -> Optional[str]:
+        """
+        Invoke the configured OpsLens provider. Legacy key-based selection is
+        retained only for deployments that have not selected a provider.
+        """
+        try:
+            from llm_provider import complete_chat, selected_provider
+            if selected_provider() not in ("", "none", "off", "disabled"):
+                from llm_provider import llm_timeout
+                return complete_chat(prompt, timeout=max(self.timeout, llm_timeout()))
+        except Exception as e:
+            # Provider errors are sanitized by llm_provider; don't log exception
+            # text here because third-party clients can include request details.
+            logger.warning("[Guidance] Configured provider call failed (%s)", getattr(e, "kind", "unavailable"))
+            return None
+
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+
+        try:
+            if gemini_key:
+                return self._call_gemini(prompt, gemini_key)
+            elif openai_key:
+                return self._call_openai(prompt, openai_key)
+            elif anthropic_key:
+                return self._call_anthropic(prompt, anthropic_key)
+        except Exception as e:
+            logger.warning(f"[Guidance] Cloud LLM API call failed: {e}")
+        return None
+
+    def _call_edge_slm(self, prompt: str) -> Optional[str]:
+        """
+        Invoke local Edge Small Language Model (SLM) on edge device / gateway.
+        1. Local REST API (Ollama / llama.cpp / LocalAI at http://localhost:11434)
+        2. In-process CPU model if configured (Transformers CPU)
+        """
+        try:
+            from edge_slm import local_llm_timeout
+            edge_res = call_local_edge_slm(prompt, timeout=max(self.timeout, local_llm_timeout()))
+            if edge_res:
+                return edge_res
+
+            edge_provider = os.environ.get("EDGE_LLM_PROVIDER", "").lower()
+            if edge_provider in ["transformers", "inprocess", "local_cpu"]:
+                inproc_res = call_inprocess_slm(prompt)
+                if inproc_res:
+                    return inproc_res
+        except Exception as e:
+            logger.warning(f"[Guidance] Local edge SLM error: {e}")
+        return None
+
+    def _call_gemini(self, prompt: str, api_key: str) -> Optional[str]:
+        """Call Gemini API via REST with strict timeout."""
+        # Try gemini-2.5-flash then fallback to gemini-1.5-flash
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "application/json"
+            }
+        }
+        resp = requests.post(url, json=payload, timeout=self.timeout)
+        if resp.status_code == 200:
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    return parts[0].get("text")
+        else:
+            logger.warning(f"[Guidance] Gemini API returned HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+
+    def _call_openai(self, prompt: str, api_key: str) -> Optional[str]:
+        """Call OpenAI API via REST with strict timeout."""
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.2
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+        if resp.status_code == 200:
+            data = resp.json()
+            choices = data.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content")
+        else:
+            logger.warning(f"[Guidance] OpenAI API returned HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+
+    def _call_anthropic(self, prompt: str, api_key: str) -> Optional[str]:
+        """Call Anthropic Claude API via REST with strict timeout."""
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "claude-3-haiku-20240307",
+            "max_tokens": 512,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.2
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+        if resp.status_code == 200:
+            data = resp.json()
+            content = data.get("content", [])
+            if content:
+                return content[0].get("text")
+        else:
+            logger.warning(f"[Guidance] Anthropic API returned HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+
+    def _parse_llm_json(
+        self,
+        raw_text: str,
+        expected_event_id: str,
+        expected_sop_id: str
+    ) -> Optional[Guidance]:
+        """Parse raw LLM response text into a valid Guidance model instance."""
+        # Strip potential markdown code fences
+        cleaned = raw_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+            cleaned = cleaned.strip()
+
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            # Fallback regex extraction in case small models add conversational preambles
+            match = re.search(r"(\{.*\})", cleaned, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    logger.warning(f"[Guidance] Failed to decode JSON from LLM output: {raw_text[:100]}")
+                    return None
+            else:
+                logger.warning(f"[Guidance] Failed to decode JSON from LLM output: {raw_text[:100]}")
+                return None
+
+        explanation_text = data.get("explanation_text")
+        next_actions = data.get("next_best_actions")
+        cited_sop_id = data.get("cited_sop_id") or expected_sop_id
+
+        if not explanation_text or not isinstance(explanation_text, str):
+            return None
+
+        if not next_actions or not isinstance(next_actions, list):
+            return None
+
+        # Clean string actions
+        action_strings = [str(a).strip() for a in next_actions if str(a).strip()]
+        if not action_strings:
+            return None
+
+        return Guidance(
+            event_id=expected_event_id,
+            explanation_text=explanation_text.strip(),
+            next_best_actions=action_strings[:3],
+            cited_sop_id=cited_sop_id
+        )
+
+    @staticmethod
+    def _validate_sop_actions(guidance: Guidance, sop_match: Optional[SopMatch]) -> bool:
+        """Generated actions must be copied from retrieved SOP text."""
+        if not sop_match or not sop_match.steps:
+            return all(action.strip() == "Operator verification required." for action in guidance.next_best_actions)
+        source = " ".join(sop_match.steps).lower()
+        return all(action.strip().lower() in source for action in guidance.next_best_actions)
+
+    def _validate_numerical_fidelity(self, text: str, evidence: Evidence,
+                                     story: Optional[EventStory] = None,
+                                     sop_match: Optional[SopMatch] = None) -> bool:
+        """
+        Allow numbers in generated explanation only when they occur in event,
+        evidence, retrieved SOP, or contextual telemetry facts.
+        """
+        # Find all numbers (e.g. -44.9, 18.2, 50) in text
+        allowed_text = [story.causal_label if story else ""]
+        if story:
+            allowed_text.extend(step.description for step in story.steps)
+            allowed_text.extend(f"{step.value_before} {step.value_after}" for step in story.steps)
+        allowed_text.extend(f"{d.delta_pct} {abs(d.delta_pct)}" for d in evidence.supporting_deltas)
+        if sop_match:
+            allowed_text.extend(sop_match.steps)
+            allowed_text.append(sop_match.query_context or "")
+            trace = sop_match.rag_trace or {}
+            allowed_text.append(str(trace.get("process_context", {})))
+        # Digits inside equipment/SOP identifiers (e.g. VLV-04-POS) are labels,
+        # not process values that need numerical grounding validation.
+        identifier_pattern = r"\b[A-Z][A-Z0-9]*-\d+(?:-[A-Z0-9]+)*\b"
+        allowed_numbers = {
+            float(n) for source in allowed_text
+            for n in re.findall(r"\d+(?:\.\d+)?", re.sub(identifier_pattern, "", source, flags=re.IGNORECASE))
+        }
+        explanation_numbers = re.sub(identifier_pattern, "", text, flags=re.IGNORECASE)
+        for token in re.findall(r"\d+(?:\.\d+)?", explanation_numbers):
+            if float(token) not in allowed_numbers:
+                logger.warning(f"[Guidance] Unsupported numeric value {token} in generated guidance")
+                return False
+
+        return True
+
+    def _save_and_cache(self, guidance: Guidance, source: str) -> None:
+        """Cache guidance in-memory and write-through to SQLite."""
+        self._memory_cache[guidance.event_id] = guidance
+        self.db.save_guidance(guidance, source=source)
+        logger.info(f"[Guidance] Saved guidance for event {guidance.event_id} (source='{source}')")

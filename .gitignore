@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+.env
+.venv
+venv/
+env/
+ENV/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# SQLite databases (runtime data — do not commit)
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Node / frontend
+node_modules/
+ops-lens/frontend/dist/
+ops-lens/frontend/.vite/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+# package-lock.json is committed so every machine installs the same versions.
+yarn.lock
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets / credentials
+.env
+.env.local
+.env.*.local
+secrets.json
+*.key
+*.pem
+
+# Embedding model cache (large — download on first run)
+sentence-transformers/
+.cache/
+
+# Local embedded Qdrant runtime data (created on this edge PC)
+edge_intelligence/qdrant_data/
+edge_intelligence/plc_tag_mapping.json
+edge_intelligence/plc_tag_mapping.local.json
+edge_intelligence/plc_certs/
+edge_intelligence/.test-tmp/
+
+# Runtime logs and local data
+edge_intelligence/logs/
+hmi_ui/dist/

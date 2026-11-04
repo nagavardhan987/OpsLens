@@ -1,0 +1,26 @@
+{
+  "sop_id": "SOP-GEN-SEN-01",
+  "title": "Diagnostic Procedure for Isolated Instrument Sensor Faults",
+  "equipment_id": "Generic",
+  "tags": ["PIT-02-PRS", "FIT-02-FLW", "CMP-01-VIB", "TNK-01-LVL"],
+  "keywords": [
+    "sensor fault",
+    "transmitter spike",
+    "false positive",
+    "isolated anomaly",
+    "instrument malfunction",
+    "loop integrity",
+    "signal drift"
+  ],
+  "reference_limits": {
+    "rate_of_change_threshold": "30% excursion in < 2 seconds with zero causal correlation",
+    "action": "Sensor diagnostics and plausibility cross-check"
+  },
+  "steps": [
+    "Verify if tag excursion occurs without any upstream or downstream deviation in the causal topology.",
+    "Inspect 4-20mA loop integrity, terminal wiring, and power supply on transmitter junction box.",
+    "Perform local field gauge cross-check to verify whether physical process variable is actually deviant.",
+    "If local reading matches nominal baseline, place DCS loop in manual mode and flag transmitter for recalibration.",
+    "Replace faulty sensor cartridge or signal conditioner and perform zero/span calibration prior to re-enabling alarms."
+  ]
+}

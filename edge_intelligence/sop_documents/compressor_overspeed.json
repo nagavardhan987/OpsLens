@@ -1,0 +1,40 @@
+{
+  "sop_id": "SOP-C01-SPD-01",
+  "approved": false,
+  "document_status": "Locally authored demonstration procedure; operational approval status not verified.",
+  "title": "Compressor-01 Overspeed & Vibration Runaway Response",
+  "equipment_id": "Compressor-01",
+  "tags": [
+    "CMP-01-SPD",
+    "CMP-01-VIB",
+    "CMP-01-CUR",
+    "CMP-01-TMP",
+    "ALM-C01-VB"
+  ],
+  "keywords": [
+    "overspeed",
+    "speed runaway",
+    "governor fault",
+    "vibration surge",
+    "stator current overload",
+    "bearing temperature rise",
+    "trip alarm"
+  ],
+  "reference_limits": {
+    "max_speed_limit": 3300.0,
+    "unit_speed": "RPM",
+    "max_vib_limit": 7.0,
+    "unit_vib": "mm/s",
+    "nominal_baseline": "Speed 2950-3050 RPM, Vibration < 2.8 mm/s"
+  },
+  "steps": [
+    "Acknowledge overspeed and vibration alarms ALM-C01-VB on Compressor-01 console.",
+    "Verify shaft speed CMP-01-SPD; if speed exceeds 3300 RPM trip threshold, manually initiate emergency stop.",
+    "Verify mechanical governor throttle linkage and electronic speed controller servo feedback.",
+    "Monitor drive-end vibration CMP-01-VIB and bearing temperature CMP-01-TMP during coast-down.",
+    "Engage auxiliary lube oil system to prevent bearing seizure during emergency deceleration.",
+    "Lock out compressor drive motor and inspect rotor balance and coupling alignment before restart."
+  ],
+  "approval_status": "unverified",
+  "approval_reference": null
+}

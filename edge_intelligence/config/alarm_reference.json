@@ -1,0 +1,1754 @@
+{
+  "schema_version": "1.0",
+  "source_document": {
+    "document_id": "SOP-MAN-000",
+    "title": "SOP Manual – Wastewater Treatment Plant: Liquid, Sludge and Biogas Systems",
+    "revision": "0 (Draft for review)",
+    "file_name": "SOP Manual – Wastewater Treatment Plant.pdf",
+    "sha256": "a26b0b5eb29bdd1f7bdfcaae3de798ab5157262a0a49090bf9d1bd48a417bb22",
+    "page_count": 29,
+    "approval_status": "DRAFT / REFERENCE ONLY — NOT APPROVED",
+    "approval_note": "The approval table on page 1 is blank. Section 3 (page 2) states that all set points, alarm levels and operating ranges are typical values for a mid-size plant that must be verified against manufacturer data, design basis, discharge permit and local regulations before use."
+  },
+  "extraction_rules": [
+    "Every value below was copied from the cited page of SOP-MAN-000. Nothing was estimated.",
+    "Fields the manual does not state are recorded as the string NOT SPECIFIED.",
+    "The manual names parameters, not PLC/HMI alarm tags. The 'opslens_mapping' block records which OpsLens simulated tag was associated with each parameter and how confident that association is.",
+    "The manual does not define alarm deadbands or reset/clear conditions. 'verification_criteria' records the procedure's own recovery checks, which are NOT alarm reset conditions."
+  ],
+  "priority_convention": {
+    "source_page": 4,
+    "section": "6. Alarm Priority Convention",
+    "levels": [
+      {
+        "priority": "P1",
+        "meaning": "Risk to life, environment or permit compliance now",
+        "acknowledge_within_seconds": 120,
+        "acknowledge_within_text": "2 minutes",
+        "operator_on_location_within_text": "15 minutes"
+      },
+      {
+        "priority": "P2",
+        "meaning": "Equipment or process degrading, likely to reach P1",
+        "acknowledge_within_seconds": 300,
+        "acknowledge_within_text": "5 minutes",
+        "operator_on_location_within_text": "30 minutes"
+      },
+      {
+        "priority": "P3",
+        "meaning": "Advisory, no immediate effect",
+        "acknowledge_within_seconds": 1800,
+        "acknowledge_within_text": "30 minutes",
+        "operator_on_location_within_text": "Next round"
+      }
+    ]
+  },
+  "alarm_response_rules": {
+    "source_document": "SOP-GEN-003",
+    "source_pages": [
+      8,
+      9
+    ],
+    "rules": [
+      "Acknowledge the alarm within the time in the Alarm Priority Convention (Section 6 of this manual).",
+      "Read the tag name, value, limit and time. Check related instruments to confirm the alarm is genuine and not a sensor fault.",
+      "Classify the alarm P1, P2 or P3.",
+      "For P1 and P2: inform the shift supervisor, then go to the location with a torch, gas monitor and radio.",
+      "Take the immediate safe action in the relevant process SOP.",
+      "If the value keeps moving toward the next limit, escalate to the supervisor and on-call maintenance.",
+      "Never disable, shelve or inhibit an alarm without the supervisor's written approval.",
+      "Record the alarm, action, outcome and time in the shift log."
+    ]
+  },
+  "definitions": [
+    {
+      "id": "LFT-WW-LEVEL",
+      "parameter": "Wet well level",
+      "process_area": "Lift station and wet well",
+      "sop_id": "SOP-LFT-001",
+      "source_page": 14,
+      "unit": "m",
+      "normal": {
+        "low": 1.0,
+        "high": 2.4,
+        "text": "1.0 to 2.4 m"
+      },
+      "limits": [
+        {
+          "name": "HIGH",
+          "direction": "high",
+          "value": 3.2,
+          "text": "3.2 m high",
+          "action": "Dispatch at 3.2 m",
+          "source_page": 14
+        },
+        {
+          "name": "HIGH-HIGH",
+          "direction": "high",
+          "value": 3.6,
+          "text": "3.6 m high-high",
+          "action": "tanker at 3.6 m",
+          "source_page": 14
+        },
+        {
+          "name": "P1 ESCALATION",
+          "direction": "high",
+          "value": 3.85,
+          "text": "If the level reaches 3.85 m or a spill is imminent, the event is P1. Notify the Plant Manager.",
+          "action": "Notify the Plant Manager",
+          "source_page": 15,
+          "priority": "P1"
+        },
+        {
+          "name": "SPILL",
+          "direction": "high",
+          "value": 4.0,
+          "text": "4.0 m spill",
+          "action": "NOT SPECIFIED",
+          "source_page": 14
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog level limit (high / high-high)",
+      "priority": "NOT SPECIFIED below 3.85 m; P1 at or above 3.85 m (page 15)",
+      "acknowledgement": "Acknowledge the HIGH level alarm (3.2 m). Check both pumps' status, current and pressure on SCADA. (page 14)",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Watch the wet well level fall below 2.4 m. Release the tanker. (page 15)"
+      ],
+      "interlocks_or_restrictions": [
+        "Do not enter the wet well. Use SOP-GEN-002 if entry is unavoidable. (page 14)",
+        "Isolate the failed pump under SOP-GEN-001. (page 14)"
+      ],
+      "opslens_mapping": {
+        "tag": "LIT-101-WWL",
+        "alarm_tag": "ALM-WW-101-HH",
+        "mapping": "direct",
+        "note": "Same quantity and unit. Simulated alarm inputs ALM-WW-101-H (3.2 m) and ALM-WW-101-HH (3.6 m) follow page 14.",
+        "tags": [
+          "LIT-101-WWL"
+        ],
+        "alarm_tags": [
+          "ALM-WW-101-HH",
+          "ALM-WW-101-H"
+        ]
+      }
+    },
+    {
+      "id": "LFT-PUMP-CURRENT",
+      "parameter": "Pump motor current",
+      "process_area": "Lift station and wet well",
+      "sop_id": "SOP-LFT-001",
+      "source_page": 14,
+      "unit": "A",
+      "normal": {
+        "low": 28.0,
+        "high": 34.0,
+        "text": "28 to 34 A"
+      },
+      "limits": [
+        {
+          "name": "OVERLOAD",
+          "direction": "high",
+          "value": 42.0,
+          "text": "42 A overload",
+          "action": "Investigate",
+          "source_page": 14
+        },
+        {
+          "name": "LOW-LOAD",
+          "direction": "low",
+          "value": 24.0,
+          "text": "24 A low-load",
+          "action": "Investigate",
+          "source_page": 14
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog current limit",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Verify motor current 28 to 34 A, discharge pressure 2.8 to 3.4 bar, flow 380 m³/h or above. (page 15)"
+      ],
+      "interlocks_or_restrictions": [
+        "Identify the cause before resetting the thermal overload. Do not reset repeatedly. (page 14)"
+      ],
+      "special_cases": [
+        "A reading of 0 A with the pump commanded stopped or tripped is not a low-load condition; check P101-RUN / P101-FAULT before applying the 24 A low-load limit."
+      ],
+      "opslens_mapping": {
+        "tag": "MOT-101-CUR",
+        "mapping": "direct",
+        "note": "Per-pump motor current for P-101 and P-102 (manual values are per pump).",
+        "tags": [
+          "MOT-101-CUR",
+          "MOT-102-CUR"
+        ],
+        "alarm_tag": "ALM-P102-CUR-LO",
+        "alarm_tags": [
+          "ALM-P102-CUR-LO"
+        ]
+      }
+    },
+    {
+      "id": "LFT-WINDING-TEMP",
+      "parameter": "Pump winding temperature",
+      "process_area": "Lift station and wet well",
+      "sop_id": "SOP-LFT-001",
+      "source_page": 14,
+      "unit": "°C",
+      "normal": {
+        "low": 55.0,
+        "high": 75.0,
+        "text": "55 to 75 °C"
+      },
+      "limits": [
+        {
+          "name": "TRIP",
+          "direction": "high",
+          "value": 105.0,
+          "text": "105 °C trip",
+          "action": "Do not restart until cool",
+          "source_page": 14
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog temperature trip",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Allow the motor to cool to normal winding temperature (below 75 °C) and check insulation resistance before reset. (page 14)"
+      ],
+      "interlocks_or_restrictions": [
+        "Identify the cause before resetting the thermal overload. Do not reset repeatedly. (page 14)"
+      ],
+      "opslens_mapping": {
+        "tag": "TIT-101-WDG",
+        "mapping": "direct",
+        "note": "P-101 winding temperature.",
+        "tags": [
+          "TIT-101-WDG"
+        ],
+        "alarm_tag": "P101-FAULT",
+        "alarm_tags": [
+          "P101-FAULT"
+        ]
+      }
+    },
+    {
+      "id": "LFT-PUMP-PRESSURE",
+      "parameter": "Pump discharge pressure",
+      "process_area": "Lift station and wet well",
+      "sop_id": "SOP-LFT-001",
+      "source_page": 14,
+      "unit": "bar",
+      "normal": {
+        "low": 2.8,
+        "high": 3.4,
+        "text": "2.8 to 3.4 bar"
+      },
+      "limits": [
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 2.0,
+          "text": "2.0 bar low",
+          "action": "Suspect clog",
+          "source_page": 14
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog pressure low limit",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Verify motor current 28 to 34 A, discharge pressure 2.8 to 3.4 bar, flow 380 m³/h or above. (page 15)"
+      ],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "PIT-102-DIS",
+        "mapping": "direct",
+        "note": "P-102 discharge pressure (per pump, as in the manual).",
+        "tags": [
+          "PIT-102-DIS"
+        ],
+        "alarm_tag": "ALM-P102-DIS-LO",
+        "alarm_tags": [
+          "ALM-P102-DIS-LO"
+        ]
+      }
+    },
+    {
+      "id": "LFT-PUMP-FLOW",
+      "parameter": "Pump flow",
+      "process_area": "Lift station and wet well",
+      "sop_id": "SOP-LFT-001",
+      "source_page": 14,
+      "unit": "m³/h",
+      "normal": {
+        "low": 380.0,
+        "high": 450.0,
+        "text": "380 to 450 m³/h"
+      },
+      "limits": [
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 300.0,
+          "text": "300 m³/h low",
+          "action": "Suspect clog",
+          "source_page": 14
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog flow low limit",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Verify motor current 28 to 34 A, discharge pressure 2.8 to 3.4 bar, flow 380 m³/h or above. (page 15)"
+      ],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "FIT-102-FLW",
+        "mapping": "direct",
+        "note": "P-102 flow (per pump).",
+        "tags": [
+          "FIT-102-FLW"
+        ],
+        "alarm_tag": "ALM-P102-FLW-LO",
+        "alarm_tags": [
+          "ALM-P102-FLW-LO"
+        ]
+      }
+    },
+    {
+      "id": "INL-SCREEN-DL",
+      "parameter": "Differential level across screen",
+      "process_area": "Inlet works",
+      "sop_id": "SOP-INL-001",
+      "source_page": 11,
+      "unit": "cm",
+      "normal": {
+        "low": 5.0,
+        "high": 15.0,
+        "text": "5 to 15 cm"
+      },
+      "limits": [
+        {
+          "name": "HIGH",
+          "direction": "high",
+          "value": 30.0,
+          "text": "30 cm (high)",
+          "action": "Start this SOP, Section 7",
+          "source_page": 11
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog differential level high",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "Acknowledge the alarm and inform the supervisor. Check the second screen's status. (page 11)",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Confirm the channel level falls below 1.2 m and the differential level below 15 cm. (page 12)"
+      ],
+      "interlocks_or_restrictions": [
+        "Isolate the jammed screen under SOP-GEN-001. Never reach into or onto a rake that is not locked out. (page 12)"
+      ],
+      "opslens_mapping": {
+        "tag": "LDT-110-SCR",
+        "mapping": "direct",
+        "note": "Differential level across BS-2 in cm, as in the manual.",
+        "tags": [
+          "LDT-110-SCR"
+        ],
+        "alarm_tag": "ALM-SCR-110-DL",
+        "alarm_tags": [
+          "ALM-SCR-110-DL"
+        ]
+      }
+    },
+    {
+      "id": "INL-CHANNEL-LEVEL",
+      "parameter": "Upstream channel level",
+      "process_area": "Inlet works",
+      "sop_id": "SOP-INL-001",
+      "source_page": 11,
+      "unit": "m",
+      "normal": {
+        "low": 0.8,
+        "high": 1.2,
+        "text": "0.8 to 1.2 m"
+      },
+      "limits": [
+        {
+          "name": "ACTION",
+          "direction": "high",
+          "value": 1.5,
+          "text": "1.5 m action",
+          "action": "Open bypass at 1.5 m",
+          "source_page": 11
+        },
+        {
+          "name": "OVERFLOW WEIR / P1",
+          "direction": "high",
+          "value": 1.8,
+          "text": "If the channel level reaches 1.8 m (overflow weir), the event becomes P1.",
+          "action": "Notify the Plant Manager and follow SOP-GEN-004.",
+          "source_page": 12,
+          "priority": "P1"
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog level high",
+      "priority": "NOT SPECIFIED below 1.8 m; P1 at 1.8 m (page 12)",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Confirm the channel level falls below 1.2 m and the differential level below 15 cm. (page 12)"
+      ],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "LIT-110-CH",
+        "mapping": "direct",
+        "note": "Upstream channel level.",
+        "tags": [
+          "LIT-110-CH"
+        ],
+        "alarm_tag": "ALM-INL-110-CH-HH",
+        "alarm_tags": [
+          "ALM-INL-110-CH-HH"
+        ]
+      }
+    },
+    {
+      "id": "INL-RAKE-CURRENT",
+      "parameter": "Rake motor current",
+      "process_area": "Inlet works",
+      "sop_id": "SOP-INL-001",
+      "source_page": 11,
+      "unit": "A",
+      "normal": {
+        "low": 6.0,
+        "high": 9.0,
+        "text": "6 to 9 A"
+      },
+      "limits": [
+        {
+          "name": "OVERLOAD TRIP",
+          "direction": "high",
+          "value": 14.0,
+          "text": "14 A (overload trip)",
+          "action": "Isolate before inspection",
+          "source_page": 11
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog current trip",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Restart and observe at least three full rake cycles. Motor current must return to 6 to 9 A. (page 12)"
+      ],
+      "interlocks_or_restrictions": [
+        "Isolate before inspection (page 11)"
+      ],
+      "opslens_mapping": {
+        "tag": "SCR-110-MOT-CUR",
+        "mapping": "direct",
+        "note": "BS-2 rake motor current.",
+        "tags": [
+          "SCR-110-MOT-CUR"
+        ],
+        "alarm_tag": "SCR-110-RAKE-TRIP",
+        "alarm_tags": [
+          "SCR-110-RAKE-TRIP"
+        ]
+      }
+    },
+    {
+      "id": "INL-SCREEN-FLOW",
+      "parameter": "Inlet flow per screen",
+      "process_area": "Inlet works",
+      "sop_id": "SOP-INL-001",
+      "source_page": 11,
+      "unit": "m³/h",
+      "normal": {
+        "low": 900.0,
+        "high": 1200.0,
+        "text": "900 to 1,200 m³/h (plant)"
+      },
+      "limits": [
+        {
+          "name": "SINGLE-SCREEN CAPACITY",
+          "direction": "high",
+          "value": 1500.0,
+          "text": "1,500 m³/h (single-screen capacity)",
+          "action": "Request flow reduction",
+          "source_page": 11
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog flow high",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "FIT-110-IN",
+        "mapping": "direct",
+        "note": "Inlet flow compared with one-screen capacity.",
+        "tags": [
+          "FIT-110-IN"
+        ],
+        "alarm_tag": null,
+        "alarm_tags": []
+      }
+    },
+    {
+      "id": "BIO-SRT",
+      "parameter": "Sludge age (SRT)",
+      "process_area": "Aeration tanks",
+      "sop_id": "SOP-BIO-001",
+      "source_page": 17,
+      "unit": "days",
+      "normal": {
+        "low": 5.0,
+        "high": 10.0,
+        "text": "5 to 10 days"
+      },
+      "limits": [
+        {
+          "name": "HIGH",
+          "direction": "high",
+          "value": 15.0,
+          "text": "15 days",
+          "action": "Target after control: About 11 days",
+          "source_page": 17
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Calculated process value high",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Review progress daily until foam depth stays below 5 cm for 3 consecutive days. (page 18)"
+      ],
+      "interlocks_or_restrictions": [
+        "Do not change sludge age by more than 25 % in one day, to avoid shocking the biology. (page 18)"
+      ],
+      "opslens_mapping": {
+        "tag": "AER-201-SLUDGE-AGE",
+        "mapping": "direct",
+        "note": "Sludge age.",
+        "tags": [
+          "AER-201-SLUDGE-AGE"
+        ],
+        "alarm_tag": "ALM-AER-201-SRT-HI",
+        "alarm_tags": [
+          "ALM-AER-201-SRT-HI"
+        ]
+      }
+    },
+    {
+      "id": "BIO-MLSS",
+      "parameter": "MLSS",
+      "process_area": "Aeration tanks",
+      "sop_id": "SOP-BIO-001",
+      "source_page": 17,
+      "unit": "mg/L",
+      "normal": {
+        "low": 2500.0,
+        "high": 3500.0,
+        "text": "2,500 to 3,500 mg/L"
+      },
+      "limits": [
+        {
+          "name": "HIGH",
+          "direction": "high",
+          "value": 4500.0,
+          "text": "4,500 mg/L",
+          "action": "Target after control: 3,300 mg/L",
+          "source_page": 17
+        },
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 2000.0,
+          "text": "2,000 mg/L low",
+          "action": "Restore RAS",
+          "source_page": 19,
+          "sop_id": "SOP-BIO-002"
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Laboratory / analyser high",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "AER-201-MLSS",
+        "mapping": "direct",
+        "note": "Aeration MLSS. High limit from SOP-BIO-001 (p.17); low limit from SOP-BIO-002 (p.19).",
+        "tags": [
+          "AER-201-MLSS"
+        ],
+        "alarm_tag": "ALM-AER-201-MLSS-HI",
+        "alarm_tags": [
+          "ALM-AER-201-MLSS-HI",
+          "ALM-AER-201-MLSS-LO"
+        ]
+      }
+    },
+    {
+      "id": "BIO-DO",
+      "parameter": "Dissolved oxygen",
+      "process_area": "Aeration tanks",
+      "sop_id": "SOP-BIO-001",
+      "source_page": 17,
+      "unit": "mg/L",
+      "normal": {
+        "low": 1.5,
+        "high": 3.0,
+        "text": "1.5 to 3.0 mg/L"
+      },
+      "limits": [
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 1.0,
+          "text": "Below 1.0 mg/L",
+          "action": "Target after control: 2.0 mg/L or above",
+          "source_page": 17
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analyser low",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Verify DO stays at 1.5 mg/L or above after each change. (page 18)"
+      ],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "AIT-201-DO",
+        "alarm_tag": "ALM-AER-201-DO",
+        "mapping": "direct",
+        "note": "Dissolved oxygen.",
+        "tags": [
+          "AIT-201-DO"
+        ],
+        "alarm_tags": [
+          "ALM-AER-201-DO"
+        ]
+      }
+    },
+    {
+      "id": "BIO-FOAM",
+      "parameter": "Foam depth",
+      "process_area": "Aeration tanks",
+      "sop_id": "SOP-BIO-001",
+      "source_page": 17,
+      "unit": "cm",
+      "normal": {
+        "low": null,
+        "high": 2.0,
+        "text": "Below 2 cm"
+      },
+      "limits": [
+        {
+          "name": "HIGH",
+          "direction": "high",
+          "value": 10.0,
+          "text": "10 cm",
+          "action": "Target after control: Below 5 cm",
+          "source_page": 17
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Observed depth high",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Review progress daily until foam depth stays below 5 cm for 3 consecutive days. (page 18)"
+      ],
+      "interlocks_or_restrictions": [
+        "Do not pump trapped foam directly to the digester without approval. (page 18)",
+        "Use anti-foam chemicals only on Process Engineer approval, as a short-term measure. (page 18)"
+      ],
+      "opslens_mapping": {
+        "tag": "AER-201-FOAM-DEPTH",
+        "alarm_tag": "ALM-AER-201-FOAM",
+        "mapping": "direct",
+        "note": "Foam depth; alarm at 10 cm as in the manual.",
+        "tags": [
+          "AER-201-FOAM-DEPTH"
+        ],
+        "alarm_tags": [
+          "ALM-AER-201-FOAM"
+        ]
+      }
+    },
+    {
+      "id": "BIO-EFF-TURB",
+      "parameter": "Effluent turbidity",
+      "process_area": "Aeration tanks",
+      "sop_id": "SOP-BIO-001",
+      "source_page": 17,
+      "unit": "NTU",
+      "normal": {
+        "low": 2.0,
+        "high": 5.0,
+        "text": "2 to 5 NTU"
+      },
+      "limits": [
+        {
+          "name": "SAMPLING ACTION",
+          "direction": "high",
+          "value": 8.0,
+          "text": "If effluent turbidity exceeds 8 NTU, increase sampling to hourly and follow SOP-BIO-002 clarifier checks.",
+          "action": "Increase sampling to hourly",
+          "source_page": 18
+        },
+        {
+          "name": "PERMIT",
+          "direction": "high",
+          "value": 10.0,
+          "text": "10 NTU (permit)",
+          "action": "Inform the Plant Manager (page 18)",
+          "source_page": 17
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analyser high / permit",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "EFF-301-TURB",
+        "mapping": "direct",
+        "note": "Final effluent turbidity.",
+        "tags": [
+          "EFF-301-TURB"
+        ],
+        "alarm_tag": "ALM-EFF-301-TURB-HI",
+        "alarm_tags": [
+          "ALM-EFF-301-TURB-HI"
+        ]
+      }
+    },
+    {
+      "id": "RAS-TOTAL-FLOW",
+      "parameter": "Total RAS flow",
+      "process_area": "Secondary clarifiers, RAS pumps",
+      "sop_id": "SOP-BIO-002",
+      "source_page": 19,
+      "unit": "m³/h",
+      "normal": {
+        "low": 700.0,
+        "high": 840.0,
+        "text": "700 to 840 m³/h"
+      },
+      "limits": [
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 550.0,
+          "text": "550 m³/h low",
+          "action": "Check pumps",
+          "source_page": 19
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog flow low",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Confirm total RAS flow is climbing back toward 700 m³/h or above. (page 20)"
+      ],
+      "interlocks_or_restrictions": [
+        "Do not repeatedly reset a tripped breaker. Reset only after the cause is identified. (page 20)"
+      ],
+      "opslens_mapping": {
+        "tag": "RAS-FLOW",
+        "mapping": "direct",
+        "note": "Same quantity, unit and limits.",
+        "tags": [
+          "RAS-FLOW"
+        ],
+        "alarm_tag": "ALM-RAS-201-FLOW-LO",
+        "alarm_tags": [
+          "ALM-RAS-201-FLOW-LO"
+        ]
+      }
+    },
+    {
+      "id": "RAS-WINDING-TEMP",
+      "parameter": "RAS pump winding temperature",
+      "process_area": "Secondary clarifiers, RAS pumps",
+      "sop_id": "SOP-BIO-002",
+      "source_page": 19,
+      "unit": "°C",
+      "normal": {
+        "low": 60.0,
+        "high": 80.0,
+        "text": "60 to 80 °C"
+      },
+      "limits": [
+        {
+          "name": "TRIP",
+          "direction": "high",
+          "value": 130.0,
+          "text": "130 °C trip",
+          "action": "Do not reset until cool",
+          "source_page": 19
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog temperature trip",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [
+        "Do not reset until cool (page 19)"
+      ],
+      "opslens_mapping": {
+        "tag": "TIT-RAS-P1-WDG",
+        "mapping": "direct",
+        "note": "RAS-P1 winding temperature.",
+        "tags": [
+          "TIT-RAS-P1-WDG"
+        ],
+        "alarm_tag": "ALM-RAS-P1-FAIL",
+        "alarm_tags": [
+          "ALM-RAS-P1-FAIL"
+        ]
+      }
+    },
+    {
+      "id": "CLR-BLANKET",
+      "parameter": "Sludge blanket depth",
+      "process_area": "Secondary clarifiers, RAS pumps",
+      "sop_id": "SOP-BIO-002",
+      "source_page": 19,
+      "unit": "m",
+      "normal": {
+        "low": 0.3,
+        "high": 0.8,
+        "text": "0.3 to 0.8 m"
+      },
+      "limits": [
+        {
+          "name": "HIGH",
+          "direction": "high",
+          "value": 1.5,
+          "text": "1.5 m high",
+          "action": "Act at 1.5 m",
+          "source_page": 19
+        },
+        {
+          "name": "WAS ACTION",
+          "direction": "high",
+          "value": 2.0,
+          "text": "If the blanket exceeds 2.0 m, increase WAS withdrawal temporarily ... to the process engineer's instruction.",
+          "action": "Process engineer instruction",
+          "source_page": 20
+        },
+        {
+          "name": "WEIR / P1",
+          "direction": "high",
+          "value": 2.5,
+          "text": "If the blanket reaches 2.5 m or effluent TSS reaches 30 mg/L, the event is P1.",
+          "action": "Notify the Plant Manager and follow SOP-GEN-004.",
+          "source_page": 20,
+          "priority": "P1"
+        }
+      ],
+      "alarm_tag_in_pdf": "SLUDGE BLANKET HIGH (alarm name in text, page 20)",
+      "alarm_type": "Analog level high",
+      "priority": "NOT SPECIFIED below 2.5 m; P1 at 2.5 m (page 20)",
+      "acknowledgement": "Acknowledge the SLUDGE BLANKET HIGH alarm. Check the actual blanket depth with the probe, then confirm with a manual sample. (page 20)",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Reduce the temporary flow limit gradually and watch the blanket fall below 0.8 m. This normally takes 4 to 8 hours. (page 20)"
+      ],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "SLB-201-DEPTH",
+        "alarm_tag": "ALM-SLB-201-HIGH",
+        "mapping": "direct",
+        "note": "Same quantity, unit and 1.5 m high limit.",
+        "tags": [
+          "SLB-201-DEPTH"
+        ],
+        "alarm_tags": [
+          "ALM-SLB-201-HIGH"
+        ]
+      }
+    },
+    {
+      "id": "CLR-EFF-TSS",
+      "parameter": "Effluent TSS",
+      "process_area": "Secondary clarifiers, RAS pumps",
+      "sop_id": "SOP-BIO-002",
+      "source_page": 19,
+      "unit": "mg/L",
+      "normal": {
+        "low": 8.0,
+        "high": 15.0,
+        "text": "8 to 15 mg/L"
+      },
+      "limits": [
+        {
+          "name": "ESCALATION",
+          "direction": "high",
+          "value": 25.0,
+          "text": "If effluent TSS reaches 25 mg/L or turbidity reaches 10 NTU, inform the Plant Manager.",
+          "action": "Inform the Plant Manager",
+          "source_page": 18,
+          "sop_id": "SOP-BIO-001"
+        },
+        {
+          "name": "PERMIT / P1",
+          "direction": "high",
+          "value": 30.0,
+          "text": "30 mg/L (permit)",
+          "action": "Sample hourly; P1 at 30 mg/L (page 20)",
+          "source_page": 19,
+          "priority": "P1"
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Laboratory permit limit",
+      "priority": "Escalate at 25 mg/L (SOP-BIO-001 p.18); P1 at 30 mg/L (SOP-BIO-002 p.20)",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Sample the effluent hourly until TSS is back below 15 mg/L. (page 20)"
+      ],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "EFF-301-TSS",
+        "mapping": "direct",
+        "note": "Final effluent TSS (shared by the foam and RAS incidents).",
+        "tags": [
+          "EFF-301-TSS"
+        ],
+        "alarm_tag": "ALM-EFF-301-TSS-HI",
+        "alarm_tags": [
+          "ALM-EFF-301-TSS-HI"
+        ]
+      }
+    },
+    {
+      "id": "GAS-HOLDER-PRESS",
+      "parameter": "Holder pressure",
+      "process_area": "Gas line",
+      "sop_id": "SOP-GAS-001",
+      "source_page": 22,
+      "unit": "mbar",
+      "normal": {
+        "low": 15.0,
+        "high": 25.0,
+        "text": "15 to 25 mbar"
+      },
+      "limits": [
+        {
+          "name": "HIGH",
+          "direction": "high",
+          "value": 32.0,
+          "text": "32 mbar alarm",
+          "action": "Verify flare at 32 mbar",
+          "source_page": 22
+        },
+        {
+          "name": "RELIEF",
+          "direction": "high",
+          "value": 38.0,
+          "text": "38 mbar relief opens",
+          "action": "If pressure reaches 38 mbar and the flare is not burning, or the relief valve is venting, the event is P1. (page 23)",
+          "source_page": 22,
+          "priority": "P1 (conditional)"
+        }
+      ],
+      "alarm_tag_in_pdf": "GAS HOLDER PRESSURE HIGH (alarm name in text, page 22)",
+      "alarm_type": "Analog pressure high",
+      "priority": "NOT SPECIFIED at 32 mbar; P1 at 38 mbar if flare not burning or relief venting (page 23)",
+      "acknowledgement": "Acknowledge the siren and the GAS HOLDER PRESSURE HIGH alarm. Inform the shift supervisor. (page 22)",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Confirm the flare closes and holder pressure returns to 15 to 25 mbar. (page 23)"
+      ],
+      "interlocks_or_restrictions": [
+        "Do not override a flame-failure trip and do not bypass any gas safety interlock. (page 22)",
+        "Stop all hot work and cancel active permits under SOP-GEN-005. Allow no ignition sources. (page 22)"
+      ],
+      "opslens_mapping": {
+        "tag": "GAS-601-PRESS",
+        "alarm_tag": "ALM-GAS-601-HIGH",
+        "mapping": "direct",
+        "note": "Holder pressure; simulated alarm at 32 mbar as in the manual.",
+        "tags": [
+          "GAS-601-PRESS"
+        ],
+        "alarm_tags": [
+          "ALM-GAS-601-HIGH"
+        ]
+      }
+    },
+    {
+      "id": "GAS-HOLDER-FILL",
+      "parameter": "Holder fill level",
+      "process_area": "Gas line",
+      "sop_id": "SOP-GAS-001",
+      "source_page": 22,
+      "unit": "%",
+      "normal": {
+        "low": 40.0,
+        "high": 70.0,
+        "text": "40 to 70 %"
+      },
+      "limits": [
+        {
+          "name": "HIGH",
+          "direction": "high",
+          "value": 90.0,
+          "text": "90 % high",
+          "action": "Verify flare, reduce digester feed",
+          "source_page": 22
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog level high",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "GAS-601-FILL",
+        "mapping": "direct",
+        "note": "90 % high limit matches; OpsLens baseline 30–70 % differs from 40–70 %.",
+        "tags": [
+          "GAS-601-FILL"
+        ],
+        "alarm_tag": "ALM-GAS-601-FILL-HI",
+        "alarm_tags": [
+          "ALM-GAS-601-FILL-HI"
+        ]
+      }
+    },
+    {
+      "id": "GAS-PRODUCTION",
+      "parameter": "Biogas production",
+      "process_area": "Gas line",
+      "sop_id": "SOP-GAS-001",
+      "source_page": 22,
+      "unit": "m³/h",
+      "normal": {
+        "low": 160.0,
+        "high": 200.0,
+        "text": "160 to 200 m³/h"
+      },
+      "limits": [],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Record only (Alarm / Limit: n/a)",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "GAS-601-PROD",
+        "mapping": "direct",
+        "note": "Biogas production in m³/h.",
+        "tags": [
+          "GAS-601-PROD"
+        ],
+        "alarm_tag": null,
+        "alarm_tags": []
+      }
+    },
+    {
+      "id": "GAS-CHP-CONSUMPTION",
+      "parameter": "CHP gas consumption",
+      "process_area": "Gas line",
+      "sop_id": "SOP-GAS-001",
+      "source_page": 22,
+      "unit": "m³/h",
+      "normal": {
+        "low": 150.0,
+        "high": 190.0,
+        "text": "150 to 190 m³/h"
+      },
+      "limits": [
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 100.0,
+          "text": "100 m³/h low",
+          "action": "Investigate engine",
+          "source_page": 22
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog flow low",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Verify gas supply pressure, engine load 380 to 420 kWe and gas consumption 150 to 190 m³/h. (page 23)"
+      ],
+      "interlocks_or_restrictions": [
+        "Do not restart the engine until the fault is understood and repaired. (page 23)"
+      ],
+      "opslens_mapping": {
+        "tag": "CHP-601-GAS",
+        "mapping": "direct",
+        "note": "CHP gas consumption.",
+        "tags": [
+          "CHP-601-GAS"
+        ],
+        "alarm_tag": "ALM-CHP-601-GAS-LO",
+        "alarm_tags": [
+          "ALM-CHP-601-GAS-LO"
+        ]
+      }
+    },
+    {
+      "id": "GAS-LEL",
+      "parameter": "Gas near holder vent",
+      "process_area": "Gas line",
+      "sop_id": "SOP-GAS-001",
+      "source_page": 22,
+      "unit": "% LEL",
+      "normal": {
+        "low": 0.0,
+        "high": 0.0,
+        "text": "0 % LEL"
+      },
+      "limits": [
+        {
+          "name": "P1 EVACUATE",
+          "direction": "high",
+          "value": 10.0,
+          "text": "10 % LEL",
+          "action": "Evacuate zone, P1",
+          "source_page": 22,
+          "priority": "P1"
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Gas detection high",
+      "priority": "P1 (page 22)",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [
+        "Any reading of 10 % LEL or above is a P1 event: evacuate the zone, call the fire service, and inform the Plant Manager. (page 23)"
+      ],
+      "opslens_mapping": {
+        "tag": "GAS-601-LEL",
+        "mapping": "direct",
+        "note": "Methane near the holder vent in % LEL.",
+        "tags": [
+          "GAS-601-LEL"
+        ],
+        "alarm_tag": "ALM-GAS-601-LEL-HI",
+        "alarm_tags": [
+          "ALM-GAS-601-LEL-HI"
+        ]
+      }
+    },
+    {
+      "id": "SLD-BOWL-SPEED",
+      "parameter": "Bowl speed",
+      "process_area": "Sludge line",
+      "sop_id": "SOP-SLD-001",
+      "source_page": 24,
+      "unit": "rpm",
+      "normal": {
+        "low": 3200.0,
+        "high": 3200.0,
+        "text": "3,200 rpm"
+      },
+      "limits": [
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 2900.0,
+          "text": "Below 2,900 rpm",
+          "action": "Stop feed, check drive",
+          "source_page": 24
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog speed low",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [
+        "No setpoints may be changed without Process Engineer approval. (page 25)"
+      ],
+      "opslens_mapping": {
+        "tag": "SLD-701-BOWL-RPM",
+        "mapping": "direct",
+        "note": "Same quantity and unit.",
+        "tags": [
+          "SLD-701-BOWL-RPM"
+        ],
+        "alarm_tag": "ALM-SLD-701-BOWL-LO",
+        "alarm_tags": [
+          "ALM-SLD-701-BOWL-LO"
+        ]
+      }
+    },
+    {
+      "id": "SLD-CAPTURE",
+      "parameter": "Solids capture",
+      "process_area": "Sludge line",
+      "sop_id": "SOP-SLD-001",
+      "source_page": 24,
+      "unit": "%",
+      "normal": {
+        "low": 92.0,
+        "high": 97.0,
+        "text": "92 to 97 %"
+      },
+      "limits": [
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 88.0,
+          "text": "88 %",
+          "action": "Adjust, then re-test",
+          "source_page": 24
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Laboratory / calculated low",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "Acknowledge the alarm or laboratory report showing low capture, low cake dryness, or high centrate ammonia. (page 25)",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Adjust and re-sample until readings are in the Operating Limits table. (page 25)"
+      ],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "SLD-701-CAPTURE",
+        "alarm_tag": "ALM-SLD-701-CAPTURE",
+        "mapping": "direct",
+        "note": "Solids capture; alarm at 88 % as in the manual.",
+        "tags": [
+          "SLD-701-CAPTURE"
+        ],
+        "alarm_tags": [
+          "ALM-SLD-701-CAPTURE"
+        ]
+      }
+    },
+    {
+      "id": "SLD-CAKE-DRY",
+      "parameter": "Cake dryness",
+      "process_area": "Sludge line",
+      "sop_id": "SOP-SLD-001",
+      "source_page": 24,
+      "unit": "% DS",
+      "normal": {
+        "low": 22.0,
+        "high": 26.0,
+        "text": "22 to 26 % DS"
+      },
+      "limits": [
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 20.0,
+          "text": "20 % DS",
+          "action": "Adjust differential speed and polymer",
+          "source_page": 24
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Laboratory low",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "SLD-701-CAKE-DRY",
+        "mapping": "direct",
+        "note": "OpsLens unit '%' assumed to mean % DS.",
+        "tags": [
+          "SLD-701-CAKE-DRY"
+        ],
+        "alarm_tag": "ALM-SLD-701-CAKE-LO",
+        "alarm_tags": [
+          "ALM-SLD-701-CAKE-LO"
+        ]
+      }
+    },
+    {
+      "id": "SLD-CENTRATE-NH4",
+      "parameter": "Centrate ammonia (NH₄-N)",
+      "process_area": "Sludge line",
+      "sop_id": "SOP-SLD-001",
+      "source_page": 24,
+      "unit": "mg/L",
+      "normal": {
+        "low": 800.0,
+        "high": 1100.0,
+        "text": "800 to 1,100 mg/L"
+      },
+      "limits": [
+        {
+          "name": "HIGH",
+          "direction": "high",
+          "value": 1400.0,
+          "text": "1,400 mg/L",
+          "action": "Control return rate",
+          "source_page": 24
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Laboratory high",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "SLD-701-CENTRATE-NH4",
+        "mapping": "direct",
+        "note": "Centrate ammonia at the manual's scale.",
+        "tags": [
+          "SLD-701-CENTRATE-NH4"
+        ],
+        "alarm_tag": "ALM-SLD-701-NH4-HI",
+        "alarm_tags": [
+          "ALM-SLD-701-NH4-HI"
+        ]
+      }
+    },
+    {
+      "id": "SLD-INLET-NH4",
+      "parameter": "Plant inlet ammonia",
+      "process_area": "Sludge line",
+      "sop_id": "SOP-SLD-001",
+      "source_page": 24,
+      "unit": "mg/L",
+      "normal": {
+        "low": 35.0,
+        "high": 42.0,
+        "text": "35 to 42 mg/L"
+      },
+      "limits": [
+        {
+          "name": "HIGH",
+          "direction": "high",
+          "value": 50.0,
+          "text": "50 mg/L",
+          "action": "Notify process engineer",
+          "source_page": 24
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analyser / laboratory high",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Increase the frequency of effluent ammonia sampling to every 4 hours until inlet ammonia is back below 42 mg/L. (page 25)"
+      ],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "INL-110-NH4",
+        "mapping": "direct",
+        "note": "Plant inlet ammonia, measured at the inlet works (InletWorks-01).",
+        "tags": [
+          "INL-110-NH4"
+        ],
+        "alarm_tag": "ALM-INL-110-NH4-HI",
+        "alarm_tags": [
+          "ALM-INL-110-NH4-HI"
+        ]
+      }
+    },
+    {
+      "id": "SLD-BLOWER-AIR",
+      "parameter": "Blower airflow",
+      "process_area": "Sludge line",
+      "sop_id": "SOP-SLD-001",
+      "source_page": 25,
+      "unit": "Nm³/h",
+      "normal": {
+        "low": 2800.0,
+        "high": 3400.0,
+        "text": "2,800 to 3,400 Nm³/h"
+      },
+      "limits": [
+        {
+          "name": "MAX",
+          "direction": "high",
+          "value": 4200.0,
+          "text": "4,200 Nm³/h max",
+          "action": "Reduce centrate return",
+          "source_page": 25
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog flow high",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [
+        "Where blower airflow approaches 4,200 Nm³/h, pause centrifuge feed and further centrate return, with the Process Engineer's approval. (page 26)"
+      ],
+      "opslens_mapping": {
+        "tag": "AER-201-AIRFLOW",
+        "mapping": "direct",
+        "note": "Aeration blower airflow (AerationBasin-01).",
+        "tags": [
+          "AER-201-AIRFLOW"
+        ],
+        "alarm_tag": "ALM-AER-201-AIR-HI",
+        "alarm_tags": [
+          "ALM-AER-201-AIR-HI"
+        ]
+      }
+    },
+    {
+      "id": "EFF-NH4",
+      "parameter": "Effluent ammonia",
+      "process_area": "Sludge line",
+      "sop_id": "SOP-SLD-001",
+      "source_page": 25,
+      "unit": "mg/L",
+      "normal": {
+        "low": 0.5,
+        "high": 2.0,
+        "text": "0.5 to 2 mg/L"
+      },
+      "limits": [
+        {
+          "name": "PERMIT",
+          "direction": "high",
+          "value": 5.0,
+          "text": "5 mg/L (permit)",
+          "action": "Escalate",
+          "source_page": 25
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Permit limit",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "EFF-301-NH4",
+        "alarm_tag": "ALM-EFF-301-NH4-HI",
+        "mapping": "direct",
+        "note": "Final effluent ammonia.",
+        "tags": [
+          "EFF-301-NH4"
+        ],
+        "alarm_tags": [
+          "ALM-EFF-301-NH4-HI"
+        ]
+      }
+    },
+    {
+      "id": "CSE-ATMOSPHERE",
+      "parameter": "Confined space atmosphere (O₂ / LEL / H₂S / CO)",
+      "process_area": "Wet well, tanks, sumps, digester",
+      "sop_id": "SOP-GEN-002",
+      "source_page": 7,
+      "unit": "mixed",
+      "normal": {
+        "low": null,
+        "high": null,
+        "text": "Oxygen 19.5 to 23.5 %; Flammable gas below 10 % LEL; H₂S below 10 ppm; CO below 25 ppm"
+      },
+      "limits": [],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Personal / portable gas monitor (entry permit)",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Re-test the atmosphere at least every 2 hours and after any break. (page 8)"
+      ],
+      "interlocks_or_restrictions": [
+        "Leave immediately if: O₂ below 19.5 % or above 23.5 %; 10 % LEL or above; H₂S 10 ppm or above; CO 25 ppm or above. (page 7)"
+      ],
+      "opslens_mapping": {
+        "tag": null,
+        "mapping": "none",
+        "note": "Portable entry-permit limits; not mapped to fixed OpsLens telemetry."
+      }
+    },
+    {
+      "id": "BIO-WAS",
+      "parameter": "WAS rate",
+      "process_area": "Aeration tanks",
+      "sop_id": "SOP-BIO-001",
+      "source_page": 17,
+      "unit": "m³/d",
+      "normal": {
+        "low": 180.0,
+        "high": 250.0,
+        "text": "180 to 250 m³/d"
+      },
+      "limits": [
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 120.0,
+          "text": "Below 120 m³/d",
+          "action": "Target after control: 260 m³/d during recovery",
+          "source_page": 17
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog limit",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [
+        "Do not change sludge age by more than 25 % in one day, to avoid shocking the biology. (page 18)"
+      ],
+      "opslens_mapping": {
+        "tag": "AER-201-WAS-FLOW",
+        "tags": [
+          "AER-201-WAS-FLOW"
+        ],
+        "alarm_tag": "ALM-AER-201-WAS-LO",
+        "alarm_tags": [
+          "ALM-AER-201-WAS-LO"
+        ],
+        "mapping": "direct",
+        "note": "Same quantity and unit."
+      }
+    },
+    {
+      "id": "BIO-FM",
+      "parameter": "F/M ratio",
+      "process_area": "Aeration tanks",
+      "sop_id": "SOP-BIO-001",
+      "source_page": 17,
+      "unit": "ratio",
+      "normal": {
+        "low": 0.2,
+        "high": 0.4,
+        "text": "0.2 to 0.4"
+      },
+      "limits": [
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 0.15,
+          "text": "Below 0.15",
+          "action": "Target after control: About 0.28",
+          "source_page": 17
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog limit",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "AER-201-FM",
+        "tags": [
+          "AER-201-FM"
+        ],
+        "alarm_tag": "ALM-AER-201-FM-LO",
+        "alarm_tags": [
+          "ALM-AER-201-FM-LO"
+        ],
+        "mapping": "direct",
+        "note": "Same quantity and unit."
+      }
+    },
+    {
+      "id": "RAS-PUMP-FLOW",
+      "parameter": "RAS pump flow (each)",
+      "process_area": "Secondary clarifiers, RAS pumps",
+      "sop_id": "SOP-BIO-002",
+      "source_page": 19,
+      "unit": "m³/h",
+      "normal": {
+        "low": 350.0,
+        "high": 420.0,
+        "text": "350 to 420 m³/h"
+      },
+      "limits": [],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Record only",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Restart the repaired pump in hand mode and verify flow 350 to 420 m³/h. (page 20)"
+      ],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "RAS-P1-FLOW",
+        "tags": [
+          "RAS-P1-FLOW"
+        ],
+        "alarm_tag": null,
+        "alarm_tags": [],
+        "mapping": "direct",
+        "note": "Same quantity and unit."
+      }
+    },
+    {
+      "id": "CLR-SOLIDS-LOADING",
+      "parameter": "Clarifier solids loading",
+      "process_area": "Secondary clarifiers, RAS pumps",
+      "sop_id": "SOP-BIO-002",
+      "source_page": 19,
+      "unit": "kg/m²/h",
+      "normal": {
+        "low": 3.0,
+        "high": 5.0,
+        "text": "3 to 5 kg/m²/h"
+      },
+      "limits": [
+        {
+          "name": "HIGH",
+          "direction": "high",
+          "value": 6.5,
+          "text": "6.5 kg/m²/h",
+          "action": "Reduce flow",
+          "source_page": 19
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog limit",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "CLR-201-SLR",
+        "tags": [
+          "CLR-201-SLR"
+        ],
+        "alarm_tag": "ALM-CLR-201-SLR-HI",
+        "alarm_tags": [
+          "ALM-CLR-201-SLR-HI"
+        ],
+        "mapping": "direct",
+        "note": "Same quantity and unit."
+      }
+    },
+    {
+      "id": "GAS-CHP-OUTPUT",
+      "parameter": "CHP electrical output",
+      "process_area": "Gas line",
+      "sop_id": "SOP-GAS-001",
+      "source_page": 22,
+      "unit": "kWe",
+      "normal": {
+        "low": 380.0,
+        "high": 420.0,
+        "text": "380 to 420 kWe (0 kWe tripped → call technician)"
+      },
+      "limits": [],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Record only",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [
+        "Verify gas supply pressure, engine load 380 to 420 kWe and gas consumption 150 to 190 m³/h. (page 23)"
+      ],
+      "interlocks_or_restrictions": [
+        "Do not restart the engine until the fault is understood and repaired. (page 23)"
+      ],
+      "opslens_mapping": {
+        "tag": "CHP-601-KWE",
+        "tags": [
+          "CHP-601-KWE"
+        ],
+        "alarm_tag": null,
+        "alarm_tags": [],
+        "mapping": "direct",
+        "note": "Same quantity and unit."
+      }
+    },
+    {
+      "id": "SLD-POLYMER",
+      "parameter": "Polymer dose",
+      "process_area": "Sludge line",
+      "sop_id": "SOP-SLD-001",
+      "source_page": 24,
+      "unit": "kg/t DS",
+      "normal": {
+        "low": 8.0,
+        "high": 12.0,
+        "text": "8 to 12 kg/t DS"
+      },
+      "limits": [
+        {
+          "name": "LOW",
+          "direction": "low",
+          "value": 6.0,
+          "text": "Below 6 kg/t DS",
+          "action": "Check dosing pump and concentration",
+          "source_page": 24
+        }
+      ],
+      "alarm_tag_in_pdf": "NOT SPECIFIED",
+      "alarm_type": "Analog limit",
+      "priority": "NOT SPECIFIED",
+      "acknowledgement": "NOT SPECIFIED",
+      "reset_condition": "NOT SPECIFIED",
+      "verification_criteria": [],
+      "interlocks_or_restrictions": [],
+      "opslens_mapping": {
+        "tag": "SLD-701-POLYMER",
+        "tags": [
+          "SLD-701-POLYMER"
+        ],
+        "alarm_tag": "ALM-SLD-701-POLY-LO",
+        "alarm_tags": [
+          "ALM-SLD-701-POLY-LO"
+        ],
+        "mapping": "direct",
+        "note": "Same quantity and unit."
+      }
+    }
+  ],
+  "known_gaps": [
+    "The manual does not list PLC/HMI alarm tag names, alarm deadbands, on/off delays, or reset/clear conditions for any alarm.",
+    "The manual does not assign a P1/P2/P3 priority to individual alarm limits, except where an escalation clause states the event becomes P1.",
+    "All numerical values are 'typical values for a mid-size plant' (page 2) and the approval table (page 1) is blank."
+  ]
+}

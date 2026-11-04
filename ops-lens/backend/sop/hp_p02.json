@@ -1,0 +1,41 @@
+{
+  "sop_id": "HP-P02",
+  "title": "High Pressure Response Procedure",
+  "system": "Pump-02 Feed Water Line",
+  "revision": "v2.4",
+  "keywords": ["high pressure", "pump", "valve", "restriction", "pump-02", "valve-04", "pit-02"],
+  "summary": "Verify Valve-04 position and Pump-02 operating condition.",
+  "effective_limit": "6.0 bar max operating pressure",
+  "steps": [
+    {
+      "step_number": 1,
+      "instruction": "Verify pressure reading.",
+      "detail": "Cross-check transmitter PIT-02-PRS against backup local gauge PI-02B to rule out instrumentation failure.",
+      "safety_note": "Do not enter containment valve pit if line is hammering."
+    },
+    {
+      "step_number": 2,
+      "instruction": "Check Valve-04 position.",
+      "detail": "Inspect actuator control signal and mechanical indicator on Valve-04 (VLV-04-POS). Verify if positioner commanded reduction to 43% or physical blockage exists.",
+      "safety_note": "Ensure bypass line is isolated before manual jog."
+    },
+    {
+      "step_number": 3,
+      "instruction": "Verify Pump-02 operating condition.",
+      "detail": "Check motor current (MOT-02-CUR), casing vibration, and bearing temperatures. Inspect for cavitation or excessive recirculation backpressure.",
+      "safety_note": "High motor current (9.2 A) approaching thermal overload limit (10.0 A)."
+    },
+    {
+      "step_number": 4,
+      "instruction": "If pressure remains above the limit, follow the applicable shutdown procedure.",
+      "detail": "If pressure does not normalize below 5.2 bar within 120 seconds of valve trim, trip Pump-02 via emergency stop push button or DCS permissive sequence.",
+      "safety_note": "Overpressure protection burst disc threshold is 8.0 bar."
+    },
+    {
+      "step_number": 5,
+      "instruction": "Escalate to maintenance if valve malfunction is suspected.",
+      "detail": "Contact mechanical maintenance dispatch (Ext. 4410) and log work order for actuator recalibration or trim debris clearance.",
+      "safety_note": "Complete shift handover log entry before shift change."
+    }
+  ]
+}

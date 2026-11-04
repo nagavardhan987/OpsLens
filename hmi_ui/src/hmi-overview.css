@@ -1,0 +1,204 @@
+/* Operator overview, designed for a 1366x768 HMI panel (16:9).
+   ISA-101 style: neutral grey surfaces, colour reserved for alarm state.
+   The page never scrolls; long lists scroll inside their own panel. */
+.ov-shell {
+  --ov-bg: #E9EDEA; --ov-panel: #FFFFFF; --ov-line: #D3DBD5; --ov-text: #1E2F25; --ov-muted: #5E6F65;
+  --ov-p1: #C4161C; --ov-p1-bg: #FDECEC; --ov-p2: #D9600B; --ov-p2-bg: #FFF1E5; --ov-p3: #B78A00; --ov-p3-bg: #FFF8DB;
+  --ov-p4: #3E6E9E; --ov-ok: #11793F; --ov-ok-bg: #E6F4EC; --ov-ai: #1C5FD1;
+  height: 100vh; overflow: hidden; display: flex; flex-direction: column; background: var(--ov-bg) !important; color: var(--ov-text);
+  font-size: 12px;
+}
+.ov-shell .mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+.ov-shell .muted { color: var(--ov-muted); }
+.ov-shell .spin { animation: ov-spin 1s linear infinite; }
+@keyframes ov-spin { to { transform: rotate(360deg); } }
+
+/* ---- top bar ---- */
+.ov-topbar { flex: 0 0 40px; display: flex; align-items: center; gap: 10px; padding: 0 10px; background: #1F2D25; color: #E9F1EC; }
+.ov-brand { display: flex; align-items: center; gap: 7px; font-weight: 800; font-size: 14px; letter-spacing: -.01em; white-space: nowrap; }
+.ov-brand i { width: 9px; height: 9px; border-radius: 50%; background: #3DCD58; box-shadow: 0 0 0 3px #3DCD5833; }
+.ov-brand small { color: #A9BBB0; font-weight: 500; font-size: 11px; }
+.ov-top-stats { display: flex; gap: 6px; margin-left: 8px; }
+.ov-top-stat { display: flex; align-items: baseline; gap: 5px; padding: 3px 8px; border-radius: 4px; background: #2B3B31; font-size: 11px; color: #C5D3CA; white-space: nowrap; }
+.ov-top-stat b { font-size: 14px; color: #fff; }
+.ov-top-stat.p1 { background: var(--ov-p1); color: #fff; }
+.ov-top-stat.p1 b { color: #fff; }
+.ov-top-spacer { flex: 1; }
+.ov-source { padding: 4px 9px; border-radius: 4px; font: 700 11px 'IBM Plex Mono', monospace; letter-spacing: .04em; white-space: nowrap; border: 1px solid; }
+.ov-source.simulated { background: #FFF4D6; color: #6B4E00; border-color: #E8C35A; }
+.ov-source.live-plc { background: #E6F4EC; color: #0B5F31; border-color: #7CC79A; }
+.ov-source.stale, .ov-source.plc-disconnected { background: #FDECEC; color: #8F1116; border-color: #E79A9C; }
+.ov-source.no-data, .ov-source.recorded { background: #2B3B31; color: #C5D3CA; border-color: #3E5246; }
+.ov-ai-pill { display: flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 4px; background: #2B3B31; font-size: 11px; white-space: nowrap; }
+.ov-ai-pill i { width: 8px; height: 8px; border-radius: 50%; background: #8C9A91; }
+.ov-ai-pill.ready i { background: #3DCD58; } .ov-ai-pill.verified i { background: #3DCD58; box-shadow: 0 0 0 3px #3DCD5840; }
+.ov-ai-pill.down i { background: #F05A4F; }
+.ov-top-btn { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border: 1px solid #3E5246; border-radius: 4px; background: #2B3B31; color: #E9F1EC; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.ov-top-btn:hover { background: #36493D; }
+.ov-top-btn b { padding: 0 5px; border-radius: 8px; background: var(--ov-p2); color: #fff; font-size: 10px; }
+.ov-clock { font: 600 12px 'IBM Plex Mono', monospace; color: #C5D3CA; }
+
+/* ---- sidebar overlays rather than pushes, so the 1366 layout never reflows ---- */
+.ov-shell .operator-workspace { flex: 1; min-height: 0; }
+.ov-shell .operator-sidebar { flex: 0 0 48px; width: 48px; padding: 5px; gap: 3px; }
+.ov-shell .operator-sidebar.expanded { position: absolute; inset: 0 auto 0 0; z-index: 60; width: 212px; box-shadow: 8px 0 24px #1e2f2530; }
+.ov-shell .operator-sidebar-toggle, .ov-shell .operator-nav-item { min-height: 38px; }
+.ov-shell .operator-sidebar-backdrop { display: block; position: absolute; inset: 0; z-index: 55; background: #1e2f2522; border: 0; }
+.ov-shell .operator-main { min-width: 0; min-height: 0; overflow: auto; padding: 8px; gap: 8px; }
+.ov-shell .operator-main.page-overview { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; gap: 6px; padding: 6px; }
+
+/* ---- alarm banner ---- */
+.ov-banner { display: flex; align-items: center; gap: 10px; min-height: 46px; padding: 5px 10px 5px 0; border: 1px solid var(--ov-line); border-left-width: 0; border-radius: 6px; background: var(--ov-panel); overflow: hidden; }
+.ov-banner.idle { padding-left: 12px; color: var(--ov-muted); }
+.ov-banner.p1 { background: var(--ov-p1-bg); border-color: #EFB4B6; }
+.ov-banner.p2 { background: var(--ov-p2-bg); border-color: #F2C49F; }
+.ov-banner.p3 { background: var(--ov-p3-bg); border-color: #EBD48A; }
+.ov-sev { align-self: stretch; display: grid; place-items: center; min-width: 74px; font: 800 13px 'IBM Plex Mono', monospace; color: #fff; background: var(--ov-p4); }
+.ov-sev.p1 { background: var(--ov-p1); } .ov-sev.p2 { background: var(--ov-p2); } .ov-sev.p3 { background: var(--ov-p3); }
+.ov-banner.unack .ov-sev { animation: ov-blink 1.2s steps(2, start) infinite; }
+@keyframes ov-blink { 50% { filter: brightness(1.35); } }
+@media (prefers-reduced-motion: reduce) { .ov-banner.unack .ov-sev { animation: none; } }
+.ov-banner-main { min-width: 0; flex: 1; }
+.ov-banner-title { display: flex; align-items: center; gap: 7px; white-space: nowrap; overflow: hidden; }
+.ov-banner-title strong { font-size: 14px; }
+.ov-banner-title .mono { font-size: 11px; font-weight: 600; }
+.ov-banner-incident { color: var(--ov-muted); font-style: italic; overflow: hidden; text-overflow: ellipsis; }
+.ov-banner-sub { margin-top: 2px; color: #3B4C42; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-banner-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 11px; white-space: nowrap; }
+.ov-banner-meta .overdue { color: var(--ov-p1); font-weight: 700; }
+.ov-state { padding: 2px 7px; border-radius: 3px; font: 700 10.5px 'IBM Plex Mono', monospace; }
+.ov-state.unack { background: var(--ov-p1); color: #fff; } .ov-state.ack { background: #FFE2B8; color: #7A3E00; } .ov-state.clear { background: var(--ov-ok-bg); color: var(--ov-ok); }
+.ov-state.sm { padding: 1px 5px; font-size: 9.5px; }
+
+/* ---- three columns ---- */
+.ov-grid { display: grid; grid-template-columns: 300px minmax(0, 1fr) 410px; gap: 6px; min-height: 0; }
+.ov-col { display: flex; flex-direction: column; gap: 6px; min-height: 0; min-width: 0; }
+.ov-col-a .ov-alarms { flex: 0 0 auto; max-height: 34%; }
+.ov-col-a .ov-trends { flex: 1 1 0; }
+.ov-col-b .ov-story { flex: 1 1 0; }
+.ov-col-b .ov-evidence { flex: 1.1 1 0; }
+.ov-col-c .ov-diag { flex: 1.45 1 0; }
+.ov-col-c .ov-sop { flex: 1 1 0; }
+
+.ov-panel { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--ov-line); border-radius: 6px; background: var(--ov-panel); overflow: hidden; }
+.ov-panel-head { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 30px; padding: 4px 9px; border-bottom: 1px solid #E3E8E4; background: #F6F8F6; }
+.ov-panel-head h2 { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 11.5px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; color: #2C3F33; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-head-right { display: flex; align-items: center; gap: 6px; }
+.ov-count { min-width: 22px; padding: 1px 6px; border-radius: 9px; background: var(--ov-p1); color: #fff; font-weight: 800; text-align: center; }
+.ov-sub { color: var(--ov-muted); font-size: 10.5px; white-space: nowrap; }
+.ov-link { display: inline-flex; align-items: center; gap: 2px; border: 0; background: none; color: #0F6A37; font-size: 11px; font-weight: 700; white-space: nowrap; cursor: pointer; }
+.ov-link:disabled { color: #9AA59E; cursor: default; }
+.ov-icon-btn { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--ov-line); border-radius: 4px; background: #fff; color: #3B4C42; }
+.ov-icon-btn:disabled { opacity: .45; }
+.ov-empty { padding: 10px; color: var(--ov-muted); display: flex; align-items: center; gap: 6px; }
+.ov-error { margin: 6px 0; padding: 6px 8px; border-radius: 4px; background: var(--ov-p1-bg); color: #8F1116; }
+.ov-foot-note { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; margin: 0; padding: 3px 9px; border-top: 1px solid #EEF1EE; color: var(--ov-muted); font-size: 10px; }
+
+.ov-chip { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 3px; font: 700 10px 'IBM Plex Mono', monospace; letter-spacing: .02em; white-space: nowrap; }
+.ov-chip.sm { margin-right: 5px; padding: 0 4px; font-size: 9px; vertical-align: 1px; }
+.ov-chip.red { background: var(--ov-p1); color: #fff; } .ov-chip.amber { background: #FFE9B3; color: #6B4700; }
+.ov-chip.green { background: var(--ov-ok-bg); color: var(--ov-ok); } .ov-chip.blue { background: #E4EDFC; color: var(--ov-ai); }
+.ov-chip.grey { background: #ECEFED; color: #4A5A50; }
+
+/* alarms */
+.ov-alarm-list { overflow-y: auto; min-height: 0; }
+.ov-alarm-row { display: flex; align-items: stretch; gap: 7px; width: 100%; padding: 0 8px 0 0; border: 0; border-bottom: 1px solid #EEF1EE; background: #fff; text-align: left; cursor: pointer; }
+.ov-alarm-row:hover { background: #F4F7F5; }
+.ov-alarm-row.selected { background: #E8F0FB; box-shadow: inset 0 0 0 1px #9DBBEA; }
+.ov-alarm-bar { flex: 0 0 5px; background: var(--ov-p4); }
+.ov-alarm-bar.p1 { background: var(--ov-p1); } .ov-alarm-bar.p2 { background: var(--ov-p2); }
+.ov-alarm-text { flex: 1; min-width: 0; padding: 5px 0; }
+.ov-alarm-text strong { display: block; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-alarm-text small { display: block; color: var(--ov-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-alarm-meta { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 2px; }
+.ov-alarm-meta small { color: var(--ov-muted); font-size: 10px; }
+
+/* trends */
+.ov-trend-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 5px; overflow-y: auto; min-height: 0; align-content: start; }
+.ov-trend { min-width: 0; padding: 4px 6px 3px; border: 1px solid #E1E7E2; border-radius: 4px; background: #FBFCFB; }
+.ov-trend.alarm { border-color: #E9A3A5; background: #FFF6F6; }
+.ov-trend-head { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+.ov-trend-label { font-size: 10.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-trend-body { display: flex; align-items: flex-end; justify-content: space-between; gap: 2px; }
+.ov-trend-value { white-space: nowrap; }
+.ov-trend-value strong { font: 700 16px 'IBM Plex Mono', monospace; }
+.ov-trend.alarm .ov-trend-value strong { color: var(--ov-p1); }
+.ov-trend-value small { margin-left: 2px; color: var(--ov-muted); font-size: 9.5px; }
+.ov-trend-foot, .ov-trend-norm { display: flex; justify-content: space-between; color: var(--ov-muted); font-size: 9.5px; white-space: nowrap; overflow: hidden; }
+.ov-spark-band { fill: #DCEFE3; }
+.ov-spark-limit { stroke: var(--ov-p1); stroke-width: 1; stroke-dasharray: 3 2; }
+.ov-spark-line { fill: none; stroke: #2F4A3A; stroke-width: 1.5; }
+.ov-spark-line.alarm { stroke: var(--ov-p1); }
+.ov-spark-dot { fill: #2F4A3A; } .ov-spark-dot.alarm { fill: var(--ov-p1); }
+
+/* story */
+.ov-story-list { margin: 0; padding: 4px 0; list-style: none; overflow-y: auto; min-height: 0; }
+.ov-story-list li { display: grid; grid-template-columns: 58px 10px minmax(0, 1fr) auto; align-items: center; gap: 6px; padding: 3px 9px; font-size: 11.5px; }
+.ov-story-list li:nth-child(odd) { background: #FAFBFA; }
+.ov-story-time { color: var(--ov-muted); font-size: 10.5px; }
+.ov-story-dot { width: 8px; height: 8px; border-radius: 50%; background: #9AA9A0; }
+.ov-story-list li.alarm .ov-story-dot { background: var(--ov-p1); }
+.ov-story-list li.alarm strong { color: #8F1116; }
+.ov-story-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-story-text .mono { color: var(--ov-muted); font-size: 10px; }
+.ov-story-change { font-size: 10.5px; white-space: nowrap; }
+
+/* evidence table */
+.ov-table-wrap { overflow: auto; min-height: 0; flex: 1; }
+.ov-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.ov-table th { position: sticky; top: 0; z-index: 1; padding: 4px 7px; background: #F1F4F2; color: var(--ov-muted); font-size: 9.5px; font-weight: 700; text-align: left; text-transform: uppercase; letter-spacing: .04em; }
+.ov-table td { padding: 3px 7px; border-bottom: 1px solid #EEF1EE; vertical-align: top; }
+.ov-table .r { text-align: right; white-space: nowrap; }
+.ov-table td.mono { font-size: 10px; white-space: nowrap; }
+.ov-table tr.hit td { background: #FFF6F6; }
+
+/* AI diagnosis */
+.ov-diag-body { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 10px; font-size: 11.5px; line-height: 1.38; }
+.ov-diag-section h3 { margin: 6px 0 2px; font-size: 11px; font-weight: 800; color: #1F3A2B; text-transform: uppercase; letter-spacing: .03em; }
+.ov-diag-section:first-child h3 { margin-top: 0; }
+.ov-diag-section ul { margin: 0; padding-left: 14px; }
+.ov-diag-section li { margin: 1px 0; }
+.ov-loading { display: flex; align-items: center; gap: 6px; color: var(--ov-ai); font-weight: 600; }
+.ov-fallback { display: flex; gap: 6px; margin: 0 0 6px; padding: 5px 7px; border: 1px solid #EBD48A; border-radius: 4px; background: #FFF8DB; color: #5C4600; font-size: 11px; }
+.ov-caret { display: inline-block; width: 7px; height: 13px; background: var(--ov-ai); animation: ov-blink 1s steps(2, start) infinite; }
+.ov-diag-foot { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 3px 9px; border-top: 1px solid #EEF1EE; color: var(--ov-muted); font: 10px 'IBM Plex Mono', monospace; }
+.ov-diag-foot .warn { color: #8A5A00; }
+
+/* SOP */
+.ov-sop-id { display: flex; gap: 7px; align-items: baseline; padding: 5px 9px 0; }
+.ov-sop-id strong { font: 700 12px 'IBM Plex Mono', monospace; white-space: nowrap; }
+.ov-sop-id span { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-sop-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 4px 9px; }
+.ov-gap { display: flex; gap: 5px; margin: 0 9px 4px; padding: 4px 6px; border-radius: 4px; background: #FFF1E5; color: #7A3A00; font-size: 10.5px; line-height: 1.3; }
+.ov-gap svg { flex: none; margin-top: 1px; }
+.ov-steps { flex: 1; min-height: 0; overflow-y: auto; margin: 0; padding: 2px 9px 6px; list-style: none; }
+.ov-steps li { display: flex; gap: 6px; padding: 3px 0; border-bottom: 1px dashed #E6EBE7; font-size: 11px; line-height: 1.35; }
+.ov-step-n { flex: none; display: grid; place-items: center; width: 17px; height: 17px; border-radius: 50%; background: #2F4A3A; color: #fff; font: 700 9.5px 'IBM Plex Mono', monospace; }
+
+/* workflow bar, compacted */
+.ov-shell .operator-workflow { gap: 10px; padding: 5px 8px; border-radius: 6px; }
+.ov-shell .operator-workflow-title { flex: 0 0 auto; }
+.ov-shell .operator-workflow-actions { flex-wrap: nowrap; }
+.ov-shell .operator-workflow-actions button { min-height: 32px; padding: 0 12px; font-size: 12px; }
+.ov-shell .operator-workflow-actions button.acknowledge { min-height: 34px; }
+.ov-shell .operator-action-error, .ov-shell .operator-action-success { margin: 0; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 360px; }
+
+/* detail pages opened from the sidebar keep their own scroll */
+.ov-page { min-height: 0; }
+.ov-page-title { display: flex; align-items: baseline; gap: 10px; margin: 0 0 6px; }
+.ov-page-title h1 { margin: 0; font-size: 17px; }
+.ov-page-title span { color: var(--ov-muted); font-size: 11px; }
+
+/* smaller screens: stack, allow page scroll */
+@media (max-width: 1100px) {
+  .ov-shell { height: auto; min-height: 100vh; overflow: auto; }
+  .ov-shell .operator-main.page-overview { overflow: visible; grid-template-rows: auto auto auto; }
+  .ov-grid { grid-template-columns: 1fr; }
+  .ov-col .ov-panel { min-height: 260px; }
+  .ov-shell .operator-workflow-actions { flex-wrap: wrap; }
+}
+.ov-plant-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.ov-plant-card.alarm { border-color: #E9A3A5; }
+@media (max-width: 1100px) { .ov-plant-grid { grid-template-columns: 1fr 1fr; } }
+.ov-gap span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ov-sop .ov-steps { min-height: 64px; }

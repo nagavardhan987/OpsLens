@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">OpsLens EcoStruxure Operator Panel</title>
+  <desc id="desc">Read-only Pump-02 high-pressure incident overview with process signals, causal sequence, evidence and matched SOP.</desc>
+  <defs>
+    <linearGradient id="bg" x2="0" y2="1"><stop stop-color="#0c1219"/><stop offset="1" stop-color="#080d12"/></linearGradient>
+    <linearGradient id="panel" x2="0" y2="1"><stop stop-color="#131c26"/><stop offset="1" stop-color="#0e151e"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000" flood-opacity=".28"/></filter>
+    <style>
+      text{font-family:Arial,Helvetica,sans-serif;fill:#e8eef3}.mono{font-family:Consolas,monospace;letter-spacing:.7px}.muted{fill:#8fa0ae}.green{fill:#42d77d}.amber{fill:#ffc84a}.red{fill:#ff6868}.small{font-size:13px}.tiny{font-size:11px}.label{font-size:12px;font-weight:700;letter-spacing:1.4px}.value{font-size:34px;font-weight:700}.card{fill:url(#panel);stroke:#253341;stroke-width:1.3}.line{stroke:#283745;stroke-width:1}
+    </style>
+  </defs>
+  <rect width="1280" height="720" fill="url(#bg)"/>
+  <rect width="1280" height="6" fill="#42d77d"/>
+
+  <!-- Header -->
+  <text x="36" y="48" font-size="25" font-weight="700"><tspan class="green">OPSLENS</tspan><tspan fill="#70808d" font-size="15" font-weight="400">  /  ECOSTRUXURE OPERATOR PANEL</tspan></text>
+  <text x="37" y="72" class="muted small">EDGE INTELLIGENCE  ·  PUMPING SYSTEM  ·  PUMP-02 DEMO SNAPSHOT</text>
+  <rect x="1035" y="28" width="205" height="32" rx="16" fill="#102b20" stroke="#2c7650"/>
+  <circle cx="1054" cy="44" r="5" fill="#42d77d"/>
+  <text x="1068" y="49" class="green mono tiny" font-weight="700">STATIC LAYOUT PREVIEW</text>
+
+  <!-- Critical alarm banner -->
+  <rect x="32" y="94" width="1216" height="62" rx="9" fill="#2a1519" stroke="#a63840" stroke-width="1.4"/>
+  <rect x="32" y="94" width="6" height="62" rx="3" fill="#ff555d"/>
+  <rect x="54" y="111" width="82" height="28" rx="5" fill="#b72d38"/>
+  <text x="95" y="130" text-anchor="middle" font-size="12" font-weight="700" letter-spacing="1">CRITICAL</text>
+  <text x="157" y="120" font-size="17" font-weight="700">ALM-P02-HP</text>
+  <text x="157" y="141" class="muted small">Pump-02 High Pressure  ·  Trip alarm active</text>
+  <text x="1218" y="130" text-anchor="end" class="red mono small" font-weight="700">ACTIVE INCIDENT</text>
+
+  <!-- Telemetry cards -->
+  <g filter="url(#shadow)">
+    <rect class="card" x="32" y="176" width="292" height="128" rx="10"/>
+    <rect class="card" x="342" y="176" width="292" height="128" rx="10"/>
+    <rect class="card" x="652" y="176" width="292" height="128" rx="10"/>
+    <rect class="card" x="962" y="176" width="286" height="128" rx="10"/>
+  </g>
+  <g class="mono tiny muted">
+    <text x="54" y="204">VLV-04-POS</text><text x="364" y="204">FIT-02-FLW</text><text x="674" y="204">MOT-02-CUR</text><text x="984" y="204">PIT-02-PRS</text>
+  </g>
+  <g class="small">
+    <text x="54" y="227">Valve Position</text><text x="364" y="227">Flow Rate</text><text x="674" y="227">Motor Current</text><text x="984" y="227">Line Pressure</text>
+  </g>
+  <text x="54" y="271" class="value red">43<tspan font-size="17" class="muted"> %</tspan></text>
+  <text x="364" y="271" class="value red">56<tspan font-size="17" class="muted"> L/min</tspan></text>
+  <text x="674" y="271" class="value amber">9.2<tspan font-size="17" class="muted"> A</tspan></text>
+  <text x="984" y="271" class="value red">6.9<tspan font-size="17" class="muted"> bar</tspan></text>
+  <g class="mono tiny" font-weight="700">
+    <text x="299" y="203" text-anchor="end" class="red">−45%</text><text x="609" y="203" text-anchor="end" class="red">−32%</text><text x="919" y="203" text-anchor="end" class="amber">+21%</text><text x="1223" y="203" text-anchor="end" class="red">+47%</text>
+  </g>
+  <g><rect x="54" y="284" width="248" height="4" rx="2" fill="#283745"/><rect x="54" y="284" width="110" height="4" rx="2" fill="#ff6868"/>
+    <rect x="364" y="284" width="248" height="4" rx="2" fill="#283745"/><rect x="364" y="284" width="139" height="4" rx="2" fill="#ff6868"/>
+    <rect x="674" y="284" width="248" height="4" rx="2" fill="#283745"/><rect x="674" y="284" width="190" height="4" rx="2" fill="#ffc84a"/>
+    <rect x="984" y="284" width="240" height="4" rx="2" fill="#283745"/><rect x="984" y="284" width="199" height="4" rx="2" fill="#ff6868"/></g>
+
+  <!-- Causal sequence -->
+  <rect class="card" x="32" y="322" width="1216" height="171" rx="10"/>
+  <text x="54" y="351" class="green label">EVENT STORY  /  TEMPORAL + PROCESS CONTEXT</text>
+  <text x="54" y="375" font-size="16" font-weight="700">Valve restriction → Flow reduction → Motor current surge → Pressure surge → High pressure alarm</text>
+  <g>
+    <rect x="52" y="394" width="220" height="78" rx="7" fill="#101923" stroke="#263542"/>
+    <rect x="291" y="394" width="220" height="78" rx="7" fill="#101923" stroke="#263542"/>
+    <rect x="530" y="394" width="220" height="78" rx="7" fill="#101923" stroke="#263542"/>
+    <rect x="769" y="394" width="220" height="78" rx="7" fill="#101923" stroke="#263542"/>
+    <rect x="1008" y="394" width="218" height="78" rx="7" fill="#241519" stroke="#a63840"/>
+    <g class="mono tiny green" font-weight="700"><text x="66" y="416">S1  ·  VLV-04-POS</text><text x="305" y="416">S2  ·  FIT-02-FLW</text><text x="544" y="416">S3  ·  MOT-02-CUR</text><text x="783" y="416">S4  ·  PIT-02-PRS</text></g>
+    <text x="1022" y="416" class="mono tiny red" font-weight="700">S5  ·  ALM-P02-HP</text>
+    <g class="small"><text x="66" y="441">Valve position decreased</text><text x="305" y="441">Flow rate decreased</text><text x="544" y="441">Motor current increased</text><text x="783" y="441">Pressure increased</text><text x="1022" y="441">High pressure alarm</text></g>
+    <g class="mono tiny"><text x="66" y="460" class="amber">−44.5%</text><text x="305" y="460" class="amber">−32.1%</text><text x="544" y="460" class="amber">+21.1%</text><text x="783" y="460" class="amber">+46.8%</text><text x="1022" y="460" class="red">TRIP ACTIVE</text></g>
+    <g class="green" font-size="18" font-weight="700"><text x="278" y="438">›</text><text x="517" y="438">›</text><text x="756" y="438">›</text><text x="995" y="438">›</text></g>
+  </g>
+
+  <!-- Evidence and SOP panels -->
+  <rect class="card" x="32" y="511" width="584" height="161" rx="10"/>
+  <rect class="card" x="634" y="511" width="614" height="161" rx="10"/>
+  <text x="54" y="539" class="amber label">EVIDENCE ENGINE</text>
+  <text x="54" y="563" font-size="16" font-weight="700">Likely contributor</text>
+  <text x="54" y="598" font-size="27" class="amber" font-weight="700">VLV-04-POS</text>
+  <rect x="439" y="526" width="150" height="28" rx="5" fill="#123225" stroke="#2c7650"/>
+  <text x="514" y="545" class="green mono tiny" text-anchor="middle" font-weight="700">HIGH · 61% evidence</text>
+  <line class="line" x1="54" y1="612" x2="592" y2="612"/>
+  <text x="54" y="638" class="mono tiny muted">SUPPORTING SIGNALS</text>
+  <text x="54" y="657" class="mono tiny">VLV −44.5%   ·   FLOW −32.1%   ·   CURRENT +21.1%   ·   PRESSURE +46.8%</text>
+
+  <text x="656" y="539" class="green label">MATCHED OPERATING PROCEDURE</text>
+  <text x="656" y="566" font-size="15" font-weight="700">SOP-P02-VLV-01  ·  Pump-02 Valve Restriction Remediation</text>
+  <text x="656" y="590" class="muted small">Relevant section: Valve Restriction Remediation  ·  6 steps available</text>
+  <text x="656" y="621" class="muted tiny">WHY RETRIEVED</text>
+  <text x="656" y="642" class="small">Pump-02 high pressure · valve position fell · flow fell · motor current and pressure rose</text>
+  <text x="656" y="661" class="mono tiny muted">QDRANT SEMANTIC SEARCH  ·  all-MiniLM-L6-v2</text>
+  <rect x="1095" y="624" width="128" height="37" rx="6" fill="#153a2a" stroke="#42d77d"/>
+  <text x="1159" y="640" text-anchor="middle" class="green tiny" font-weight="700">SEMANTIC</text>
+  <text x="1159" y="654" text-anchor="middle" class="green mono small" font-weight="700">0.6889</text>
+
+  <!-- Advisory footer -->
+  <line x1="32" y1="690" x2="1248" y2="690" stroke="#263542"/>
+  <text x="36" y="710" class="muted tiny">OPS LENS GUIDANCE IS ADVISORY ONLY  ·  OPERATOR VERIFICATION REQUIRED  ·  NO PLC / VALVE / PUMP WRITE CONTROL</text>
+  <text x="1244" y="710" text-anchor="end" class="green mono tiny">EDGE PC  ·  LOCAL RAG</text>
+</svg>

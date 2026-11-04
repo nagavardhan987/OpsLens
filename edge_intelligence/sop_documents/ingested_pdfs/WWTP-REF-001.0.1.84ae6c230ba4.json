@@ -1,0 +1,23 @@
+{
+  "sop_id": "WWTP-REF-001",
+  "title": "Wastewater_Management_SOP_Reference_Template_OpsLens",
+  "equipment": "Multiple wastewater treatment systems",
+  "equipment_type": "Wastewater Treatment",
+  "plant_area": "General / Multiple Areas",
+  "revision": "0.1",
+  "effective_date": "",
+  "approval_status": "unverified",
+  "approved": false,
+  "approval_reference": null,
+  "document_status": "Approval status not verified \u2014 uploaded PDF requires document-control review.",
+  "source_pdf": "Wastewater_Management_SOP_Reference_Template_OpsLens.pdf",
+  "document_id": "WWTP-REF-001::0.1::84ae6c230ba411868a0ce2065353affd57d81599212eb288c54226b0383f2b26",
+  "manual_review_required": true,
+  "extraction_warnings": [],
+  "extraction_status": "complete",
+  "source": "local_pdf",
+  "page_count": 9,
+  "chunk_count": 36,
+  "indexed_at": "2026-10-29T10:53:24.474963+00:00",
+  "sha256": "84ae6c230ba411868a0ce2065353affd57d81599212eb288c54226b0383f2b26"
+}

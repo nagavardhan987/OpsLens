@@ -1,0 +1,29 @@
+{
+  "sop_id": "SOP-P02-VLV-01",
+  "title": "Pump-02 Throttling Valve Restriction Remediation",
+  "equipment_id": "Pump-02",
+  "tags": ["VLV-04-POS", "FIT-02-FLW", "MOT-02-CUR", "PIT-02-PRS", "ALM-P02-HP"],
+  "keywords": [
+    "valve restriction",
+    "flow reduction",
+    "motor current surge",
+    "pressure surge",
+    "high pressure alarm",
+    "discharge throttle",
+    "line overpressure"
+  ],
+  "reference_limits": {
+    "max_trip_limit": 6.5,
+    "unit": "bar",
+    "parameter": "discharge_pressure",
+    "nominal_baseline": "4.2 - 5.2 bar"
+  },
+  "steps": [
+    "Silence and acknowledge high pressure alarm ALM-P02-HP on supervisory HMI panel.",
+    "Inspect throttling control valve VLV-04-POS position feedback against automated DCS output.",
+    "If VLV-04-POS is pinched or restricted below 70%, switch loop to manual bypass mode.",
+    "Monitor discharge flow transmitter FIT-02-FLW to verify volumetric recovery above 75 L/min.",
+    "Verify motor current MOT-02-CUR subsides below 8.2 A nominal threshold.",
+    "Once discharge line pressure PIT-02-PRS stabilizes below 5.2 bar, reset ALM-P02-HP and restore cascade control."
+  ]
+}
